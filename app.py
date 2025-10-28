@@ -1,224 +1,109 @@
 import streamlit as st
-import sqlite3
-from datetime import datetime
-from thefuzz import fuzz
 import pandas as pd
-import fitz  # PyMuPDF
-import re
+import os
+from sqlalchemy import text
+from db import get_database_engine
 
-# Database connection
-conn = sqlite3.connect("inventory.db", check_same_thread=False)
-cursor = conn.cursor()
+st.set_page_config(page_title="Tool Crib", layout="centered")
 
-# Page configuration
-st.set_page_config(page_title="CNC1 Tool Crib Inventory Manager", layout="wide")
-st.title("📦 CNC1 Tool Crib Inventory Management System")
+engine = get_database_engine()
 
-# ---------------- Sidebar: Add New Item ----------------
-st.sidebar.header("➕ Add New Inventory Item")
-with st.sidebar.form("add_item_form"):
-    new_item = st.text_input("Item Name", key="add_item_name")
-    new_location = st.text_input("Location (e.g., 105A)", key="add_item_location")
-    new_quantity = st.number_input("Quantity", min_value=0, step=1, key="add_item_qty")
-    new_notes = st.text_area("Notes", key="add_item_notes")
-    submitted = st.form_submit_button("Add Item", key="add_item_submit")
-    if submitted and new_item and new_location:
-        cursor.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
-                       (new_location.strip().upper(), new_item.strip(), new_notes.strip(), int(new_quantity)))
-        conn.commit()
-        st.sidebar.success(f"Item '{new_item}' added to inventory.")
+def using_remote_db() -> bool:
+    try:
+        return bool(st.secrets.get("DATABASE_URL"))
+    except Exception:
+        return bool(os.environ.get("DATABASE_URL"))
 
-# ---------------- Tabs ----------------
-tab_inventory, tab_transactions, tab_reports = st.tabs(["📋 Inventory", "📜 Transactions", "📊 Reports"])
+def ensure_tools_table():
+    """Create the tools table if it does not exist. Uses dialect-aware SQL."""
+    dialect = engine.dialect.name if hasattr(engine, "dialect") else ""
+    if dialect == "postgresql":
+        create_sql = """
+        CREATE TABLE IF NOT EXISTS tools (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT
+        );
+        """
+    else:
+        # SQLite and other dialects
+        create_sql = """
+        CREATE TABLE IF NOT EXISTS tools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT
+        );
+        """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(create_sql))
+    except Exception as e:
+        # table creation is best-effort; log to Streamlit for debugging
+        st.warning(f"Could not ensure tools table exists: {e}")
 
-# ---------------- Inventory Tab ----------------
-with tab_inventory:
-    st.subheader("Inventory Search & Actions")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        search_name = st.text_input("Item Name", key="inv_search_name")
-    with col2:
-        cabinet_filter = st.number_input("Cabinet Number", min_value=0, step=1, key="cabinet_filter")
-    with col3:
-        drawer_filter = st.text_input("Drawer Letter", key="drawer_filter")
-    with col4:
-        search_quantity = st.number_input("Quantity", min_value=0, step=1, key="inv_search_qty")
 
-    # Build query dynamically
-    query = "SELECT * FROM inventory"
-    conditions = []
-    params = []
+def list_tools() -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql_query("SELECT * FROM tools ORDER BY id", conn)
+    except Exception as e:
+        st.error(f"Error reading tools: {e}")
+        return pd.DataFrame()
+    return df
 
-    if search_name:
-        conditions.append("item LIKE ?")
-        params.append(f"%{search_name}%")
-    if cabinet_filter > 0:
-        conditions.append("location LIKE ?")
-        params.append(f"{cabinet_filter}%")
-    if drawer_filter.strip():
-        conditions.append("location LIKE ?")
-        params.append(f"%{drawer_filter.strip().upper()}")
-    if search_quantity > 0:
-        conditions.append("quantity = ?")
-        params.append(search_quantity)
 
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
+def add_tool(name: str, description: str):
+    if not name:
+        raise ValueError("Name is required")
+    sql = text("INSERT INTO tools (name, description) VALUES (:name, :desc)")
+    with engine.begin() as conn:
+        conn.execute(sql, {"name": name, "desc": description})
 
-    cursor.execute(query, params)
-    items = cursor.fetchall()
 
-    st.write(f"Found {len(items)} items")
-    for item_id, location, name, notes, quantity in items:
-        with st.expander(f"{name} ({location})"):
-            st.write(f"**Location:** {location}")
-            st.write(f"**Quantity:** {quantity}")
-            st.write(f"**Notes:** {notes if notes else 'No notes'}")
+# Ensure table exists on startup (best-effort)
+ensure_tools_table()
 
-            # Actions: Check In/Out
-            action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"action_{item_id}")
-            user = st.text_input("User Name", key=f"user_{item_id}")
-            qty_action = st.number_input("Quantity to Check Out/In", min_value=1, step=1, key=f"qty_{item_id}")
+st.title("Tool Crib")
 
-            # Delete button
-            delete_item = st.button("❌ Delete Item", key=f"delete_{item_id}")
+# Indicate which DB is being used (safe disclosure)
+if using_remote_db():
+    st.info("Using remote Postgres (DATABASE_URL). Writes will persist.")
+else:
+    st.warning("Using local SQLite (data/mydb.db). Writes on Streamlit Cloud are ephemeral.")
 
-            if st.button("Submit", key=f"submit_{item_id}"):
-                if action != "None" and user.strip():
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                                   (name, action, user.strip(), timestamp, qty_action))
-                    # Update quantity
-                    if action == "Check Out":
-                        new_qty = max(0, quantity - qty_action)
-                    else:
-                        new_qty = quantity + qty_action
-                    cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (new_qty, item_id))
-                    conn.commit()
-                    st.success(f"{action} of {qty_action} recorded for '{name}' by {user} at {timestamp}")
-                else:
-                    st.error("Please select an action and enter a user name.")
+# Show current tools
+st.header("Existing tools")
+df = list_tools()
+if df.empty:
+    st.write("No tools found.")
+else:
+    st.dataframe(df)
 
-            # Handle deletion
-            if delete_item:
-                if user.strip():
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                                   (name, "Deleted", user.strip(), timestamp, quantity))
-                    cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item_id,))
-                    conn.commit()
-                    st.warning(f"Item '{name}' deleted and logged by {user}.")
-                else:
-                    st.error("Enter a user name before deleting.")
+# Add new tool form
+st.header("Add a new tool")
+with st.form("add_tool_form", clear_on_submit=True):
+    name = st.text_input("Name")
+    desc = st.text_area("Description")
+    submitted = st.form_submit_button("Add tool")
+    if submitted:
+        try:
+            add_tool(name.strip(), desc.strip())
+            st.success("Tool added.")
+            # refresh displayed data
+            st.experimental_rerun()
+        except Exception as e:
+            st.error(f"Failed to add tool: {e}")
 
-# ---------------- Transactions Tab ----------------
-with tab_transactions:
-    st.subheader("Search Transactions")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        trans_item = st.text_input("Item Name", key="trans_item")
-    with col2:
-        trans_user = st.text_input("User Name", key="trans_user")
-    with col3:
-        trans_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="trans_action")
-    with col4:
-        trans_qty = st.number_input("Quantity", min_value=0, step=1, key="trans_qty")
-
-    start_date = st.date_input("Start Date", value=datetime(2020, 1, 1), key="trans_start_date")
-    end_date = st.date_input("End Date", value=datetime.today(), key="trans_end_date")
-
-    # Build transaction query
-    query_tx = "SELECT * FROM transactions"
-    conditions_tx = []
-    params_tx = []
-
-    if trans_item:
-        conditions_tx.append("item LIKE ?")
-        params_tx.append(f"%{trans_item}%")
-    if trans_user:
-        conditions_tx.append("user LIKE ?")
-        params_tx.append(f"%{trans_user}%")
-    if trans_action != "All":
-        conditions_tx.append("action = ?")
-        params_tx.append(trans_action)
-    if trans_qty > 0:
-        conditions_tx.append("qty = ?")
-        params_tx.append(trans_qty)
-
-    conditions_tx.append("timestamp BETWEEN ? AND ?")
-    params_tx.append(start_date.strftime("%Y-%m-%d"))
-    params_tx.append(end_date.strftime("%Y-%m-%d"))
-
-    if conditions_tx:
-        query_tx += " WHERE " + " AND ".join(conditions_tx)
-
-    cursor.execute(query_tx, params_tx)
-    logs = cursor.fetchall()
-
-    st.write(f"Found {len(logs)} transactions")
-    for log in logs:
-        _, item_name, action, user_name, timestamp, qty = log
-        st.write(f"🕒 {timestamp} — **{action}** {qty} of '{item_name}' by {user_name}")
-
-# ---------------- Reports Tab ----------------
-with tab_reports:
-    st.subheader("Generate Inventory Report")
-    with st.form("report_form"):
-        cursor.execute("SELECT DISTINCT location FROM inventory")
-        locations = sorted(set([loc[0] for loc in cursor.fetchall()]))
-        prefixes = sorted(set([loc[:2] for loc in locations if len(loc) >= 2]))
-        selected_prefix = st.selectbox("Select location prefix", ["All"] + prefixes, key="report_prefix")
-        custom_filter = st.text_input("Or enter custom location text", key="report_custom_filter")
-        quantity_filter = st.checkbox("Show only items with 0 quantity", key="report_quantity_filter")
-        start_date = st.date_input("Start date", value=datetime(2020, 1, 1), key="report_start_date")
-        end_date = st.date_input("End date", value=datetime.today(), key="report_end_date")
-        generate_report = st.form_submit_button("Generate Report", key="report_generate_btn")
-
-    if generate_report:
-        query = "SELECT * FROM inventory"
-        conditions = []
-        params = []
-
-        if selected_prefix != "All":
-            conditions.append("location LIKE ?")
-            params.append(f"{selected_prefix}%")
-        if custom_filter:
-            conditions.append("location LIKE ?")
-            params.append(f"%{custom_filter}%")
-        if quantity_filter:
-            conditions.append("quantity = 0")
-
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
-        df_report = pd.read_sql_query(query, conn, params=params)
-        last_tx = pd.read_sql_query("SELECT item, MAX(timestamp) as last_tx FROM transactions GROUP BY item", conn)
-        df_report = df_report.merge(last_tx, on='item', how='left')
-        df_report['last_tx'] = pd.to_datetime(df_report['last_tx'], errors='coerce')
-        df_report = df_report[(df_report['last_tx'].isna()) | ((df_report['last_tx'] >= pd.to_datetime(start_date)) & (df_report['last_tx'] <= pd.to_datetime(end_date)))]
-
-        if df_report.empty:
-            st.warning("No data found for the selected filters.")
+# Debugging / logs area (optional)
+with st.expander("Connection info (safe)"):
+    try:
+        info = engine.url if hasattr(engine, "url") else None
+        if info:
+            scheme = str(info.scheme)
+            host = str(info.host) if info.host else "local"
+            dbname = str(info.database) if info.database else ""
+            st.write(f"DB scheme: {scheme}, host: {host}, db: {dbname}")
         else:
-            st.write("### Report Preview")
-            st.dataframe(df_report)
-
-            excel_path = "inventory_report.xlsx"
-            df_report.to_excel(excel_path, index=False)
-
-            pdf_path = "inventory_report.pdf"
-            doc = fitz.open()
-            text = "Inventory Report\n\n" + df_report.to_string(index=False)
-            page = doc.new_page()
-            page.insert_text((72, 72), text, fontsize=10)
-            doc.save(pdf_path)
-            doc.close()
-
-            st.subheader("📥 Download Report")
-            with open(excel_path, "rb") as f:
-                st.download_button("Download Excel Report", f, file_name=excel_path)
-            with open(pdf_path, "rb") as f:
-                st.download_button("Download PDF Report", f, file_name=pdf_path)
-
-# Close connection
-conn.close()
+            st.write("Engine created (no URL available)")
+    except Exception:
+        st.write("Unable to show connection info.")
