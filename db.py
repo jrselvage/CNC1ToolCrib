@@ -1,15 +1,11 @@
-"""
-db.py - helper to get a SQLAlchemy engine that:
-- uses st.secrets['DATABASE_URL'] (or env var) in production (Postgres)
-- falls back to a local SQLite file in data/mydb.db for local dev
-- normalizes "postgres://" -> "postgresql://" for SQLAlchemy compatibility
-"""
-
 from pathlib import Path
 import os
+import socket
+import urllib.parse as urlparse
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 def _normalize_db_url(db_url: str) -> str:
     # SQLAlchemy prefers postgresql://
@@ -17,43 +13,45 @@ def _normalize_db_url(db_url: str) -> str:
         db_url = db_url.replace("postgres://", "postgresql://", 1)
     return db_url
 
-def get_database_engine() -> Engine:
-    # 1) Use Streamlit secrets if present (preferred in cloud)
-    db_url = None
+def _engine_from_url(db_url, connect_args=None) -> Engine:
+    # create the engine; do not expose the URL elsewhere
+    return create_engine(db_url, future=True)
+
+def _try_connect_and_maybe_ipv4_fallback(db_url: str) -> Engine:
+    """
+    Try to create an engine and connect. If a socket-level 'Cannot assign requested address'
+    occurs (often due to IPv6 routing absence), resolve the host to an IPv4 address and retry.
+    """
+    parsed = urlparse.urlparse(db_url)
+    # quick shortcut: if not a network DB, just return engine
+    if parsed.scheme.startswith("sqlite"):
+        return _engine_from_url(db_url)
+
+    engine = _engine_from_url(db_url)
     try:
-        if st.secrets and st.secrets.get("DATABASE_URL"):
-            db_url = st.secrets["DATABASE_URL"]
-    except Exception:
-        # st.secrets access can raise when running outside Streamlit
-        pass
-
-    # 2) Fall back to environment variable
-    if not db_url:
-        db_url = os.environ.get("DATABASE_URL")
-
-    # 3) If we have a URL use it (Postgres or other)
-    if db_url:
-        db_url = _normalize_db_url(db_url)
-        engine = create_engine(db_url, future=True)
+        # test a quick connection
+        with engine.connect() as conn:
+            pass
         return engine
+    except OperationalError as e:
+        msg = str(e).lower()
+        # detect the IPv6 socket error pattern
+        if "cannot assign requested address" in msg:
+            # attempt IPv4 resolution for the hostname
+            host = parsed.hostname
+            port = parsed.port or 5432
+            try:
+                infos = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
+                if not infos:
+                    raise RuntimeError("No IPv4 address found for host")
+                ipv4 = infos[0][4][0]
+            except Exception:
+                # re-raise the original error if we cannot resolve IPv4
+                raise
 
-    # 4) Otherwise use local SQLite file next to this file: ./data/mydb.db
-    local_db = Path(__file__).resolve().parent / "data" / "mydb.db"
-    local_db.parent.mkdir(parents=True, exist_ok=True)
-    sqlite_url = f"sqlite:///{local_db}"
-    # connect_args={"check_same_thread": False} is not needed for short scripts,
-    # but you can add it if you see threading issues
-    engine = create_engine(sqlite_url, future=True)
-    return engine
-
-# Convenience helpers
-def read_query(sql: str, params=None):
-    engine = get_database_engine()
-    with engine.connect() as conn:
-        result = conn.execute(text(sql), params or {})
-        return [dict(row._mapping) for row in result]
-
-def write_exec(sql: str, params=None):
-    engine = get_database_engine()
-    with engine.begin() as conn:
-        conn.execute(text(sql), params or {});
+            # rebuild URL with IPv4 address (preserve username, password, dbname, query)
+            netloc_user = ""
+            if parsed.username:
+                netloc_user = parsed.username
+                if parsed.password:
+                    netloc_user += ":
