@@ -5,15 +5,24 @@ from thefuzz import fuzz
 import pandas as pd
 import fitz  # PyMuPDF
 import re
+import os
 
-# Database connection
-conn = sqlite3.connect("inventory.db", check_same_thread=False)
+os.system("streamlit run_app.py")
+
+# Try using a network drive path first
+network_db_path = r"Z:\Shared\CNC1 Tool Crib Inventory Database\inventory.db"  # UNC path
+local_db_path = "inventory.db"
+
+# Use network path if it exists, otherwise fallback to local
+db_path = network_db_path if os.path.exists(network_db_path) else local_db_path
+
+# Connect to the database
+conn = sqlite3.connect(db_path, check_same_thread=False)
 cursor = conn.cursor()
 
 # Page configuration
 st.set_page_config(page_title="CNC1 Tool Crib Inventory Manager", layout="wide")
 st.title("📦 CNC1 Tool Crib Inventory Management System")
-
 # ---------------- Sidebar: Add New Item ----------------
 st.sidebar.header("➕ Add New Inventory Item")
 with st.sidebar.form("add_item_form"):
@@ -74,6 +83,14 @@ with tab_inventory:
             st.write(f"**Location:** {location}")
             st.write(f"**Quantity:** {quantity}")
             st.write(f"**Notes:** {notes if notes else 'No notes'}")
+
+            
+            # Editable Notes
+            edited_notes = st.text_area("Edit Notes", value=notes if notes else "", key=f"edit_notes_{item_id}")
+            if st.button("Save Notes", key=f"save_notes_{item_id}"):
+                cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), item_id))
+                conn.commit()
+                st.success("Notes updated successfully.")
 
             # Actions: Check In/Out
             action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"action_{item_id}")
