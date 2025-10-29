@@ -187,8 +187,7 @@ with tab_transactions:
 with tab_reports:
     st.subheader("Generate Inventory Report")
     with st.form("report_form"):
-        
-@st.cache_data
+       @st.cache_data
 def get_locations():
     cursor.execute("SELECT DISTINCT location FROM inventory")
     return sorted(set([loc[0] for loc in cursor.fetchall()]))
