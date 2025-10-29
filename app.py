@@ -17,8 +17,14 @@ local_db_path = "inventory.db"
 db_path = network_db_path if os.path.exists(network_db_path) else local_db_path
 
 # Connect to the database
-conn = sqlite3.connect(db_path, check_same_thread=False)
+
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect("inventory.db", check_same_thread=False)
+
+conn = get_connection()
 cursor = conn.cursor()
+
 
 # Page configuration
 st.set_page_config(page_title="CNC1 Tool Crib Inventory Manager", layout="wide")
@@ -181,8 +187,14 @@ with tab_transactions:
 with tab_reports:
     st.subheader("Generate Inventory Report")
     with st.form("report_form"):
-        cursor.execute("SELECT DISTINCT location FROM inventory")
-        locations = sorted(set([loc[0] for loc in cursor.fetchall()]))
+        
+@st.cache_data
+def get_locations():
+    cursor.execute("SELECT DISTINCT location FROM inventory")
+    return sorted(set([loc[0] for loc in cursor.fetchall()]))
+
+locations = get_locations()
+
         prefixes = sorted(set([loc[:2] for loc in locations if len(loc) >= 2]))
         selected_prefix = st.selectbox("Select location prefix", ["All"] + prefixes, key="report_prefix")
         custom_filter = st.text_input("Or enter custom location text", key="report_custom_filter")
