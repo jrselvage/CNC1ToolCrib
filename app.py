@@ -12,12 +12,13 @@ DB_PATH = "inventory.db"
 def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA cache_size=10000;")
     return conn
 
 conn = get_connection()
 cursor = conn.cursor()
 
-# Create tables if not exist
+# Create tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS inventory (
     location TEXT,
@@ -35,6 +36,12 @@ CREATE TABLE IF NOT EXISTS transactions (
     qty INTEGER
 )
 """)
+
+# ------------------- ADD INDEXES FOR SPEED -------------------
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)")
 conn.commit()
 
 # ------------------- Page Config -------------------
@@ -68,147 +75,141 @@ def get_locations():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
     return sorted(df['location'].dropna().unique().tolist())
 
-# ------------------- Inventory Tab -------------------
+# ------------------- Inventory Tab (FAST + PAGINATED) -------------------
 with tab_inventory:
-    st.subheader("Search & Manage Inventory")
+    st.subheader("Inventory Search")
+
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        search_name = st.text_input("Item Name", key="inv_name")
-    with col2:
-        cabinet = st.number_input("Cabinet #", min_value=0, step=1, key="inv_cabinet", value=0)
-    with col3:
-        drawer = st.text_input("Drawer", key="inv_drawer").strip().upper()
-    with col4:
-        qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
+    with col1: search_name = st.text_input("Item Name", key="inv_name")
+    with col2: cabinet = st.number_input("Cabinet #", min_value=0, step=1, key="inv_cabinet", value=0)
+    with col3: drawer = st.text_input("Drawer", key="inv_drawer").strip().upper()
+    with col4: qty_filter = st.number_input("Qty", min_value=0, step=1, key="inv_qty", value=0)
 
-    # FIXED: Use explicit column list with rowid AS id
-    base_query = """
-    SELECT 
-        rowid AS id,
-        location,
-        item,
-        notes,
-        quantity
-    FROM inventory
-    WHERE 1=1
-    """
-    query = base_query
-    params = []
+    @st.cache_data(ttl=60)
+    def load_inventory(name="", cab=0, drw="", qty=0):
+        query = """
+        SELECT rowid AS id, location, item, notes, quantity
+        FROM inventory
+        WHERE 1=1
+        """
+        params = []
+        if name:
+            query += " AND item LIKE ?"
+            params.append(f"%{name}%")
+        if cab > 0:
+            query += " AND location LIKE ?"
+            params.append(f"{cab}%")
+        if drw:
+            query += " AND location LIKE ?"
+            params.append(f"%{drw}")
+        if qty > 0:
+            query += " AND quantity = ?"
+            params.append(qty)
+        query += " ORDER BY location, item"
+        return pd.read_sql_query(query, conn, params=params)
 
-    if search_name:
-        query += " AND item LIKE ?"
-        params.append(f"%{search_name}%")
-    if cabinet > 0:
-        query += " AND location LIKE ?"
-        params.append(f"{cabinet}%")
-    if drawer:
-        query += " AND location LIKE ?"
-        params.append(f"%{drawer}")
-    if qty_filter > 0:
-        query += " AND quantity = ?"
-        params.append(qty_filter)
+    df = load_inventory(search_name, cabinet, drawer, qty_filter)
 
-    df_items = pd.read_sql_query(query, conn, params=params)
+    if df.empty:
+        st.info("No items found.")
+    else:
+        # Pagination
+        items_per_page = 25
+        total_items = len(df)
+        total_pages = (total_items + items_per_page - 1) // items_per_page
+        page = st.selectbox("Page", options=list(range(1, total_pages + 1)), key="inv_page")
+        start_idx = (page - 1) * items_per_page
+        end_idx = start_idx + items_per_page
+        df_page = df.iloc[start_idx:end_idx]
 
-    st.write(f"**Found {len(df_items)} items**")
+        st.write(f"**Showing {start_idx + 1}–{min(end_idx, total_items)} of {total_items} items**")
 
-    for _, row in df_items.iterrows():
-        item_id  = row['id']
-        location = row['location']
-        name     = row['item']
-        notes    = row['notes'] or ""
-        quantity = row['quantity']
+        for _, row in df_page.iterrows():
+            item_id = row['id']
+            location = row['location']
+            name = row['item']
+            notes = row['notes'] or ""
+            quantity = row['quantity']
 
-        with st.expander(f"{name} @ {location} — Qty: {quantity}"):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                edited_notes = st.text_area("Notes", value=notes, key=f"notes_{item_id}", height=80)
-                if st.button("Save Notes", key=f"save_{item_id}"):
-                    cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), item_id))
+            with st.expander(f"{name} @ {location} — Qty: {quantity}"):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    edited_notes = st.text_area("Notes", value=notes, key=f"n_{item_id}", height=70)
+                    if st.button("Save Notes", key=f"s_{item_id}"):
+                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), item_id))
+                        conn.commit()
+                        st.success("Notes saved")
+                        st.rerun()
+
+                action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{item_id}")
+                user = st.text_input("Your Name", key=f"u_{item_id}")
+                qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{item_id}", value=1)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    submit = st.button("Submit", key=f"sub_{item_id}")
+                with c2:
+                    delete = st.button("Delete", key=f"del_{item_id}")
+
+                if submit and action != "None" and user.strip():
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                        (name, action, user.strip(), ts, qty)
+                    )
+                    new_qty = quantity - qty if action == "Check Out" else quantity + qty
+                    cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), item_id))
                     conn.commit()
-                    st.success("Notes saved")
+                    st.success(f"{action}: {qty} of {name}")
                     st.rerun()
 
-            # Actions
-            action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"act_{item_id}")
-            user = st.text_input("Your Name", key=f"user_{item_id}")
-            qty = st.number_input("Qty", min_value=1, step=1, key=f"qty_{item_id}", value=1)
+                if delete and user.strip():
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                        (name, "Deleted", user.strip(), ts, quantity)
+                    )
+                    cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item_id,))
+                    conn.commit()
+                    st.warning(f"Deleted: {name}")
+                    st.rerun()
 
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                submit = st.button("Submit", key=f"submit_{item_id}")
-            with col_btn2:
-                delete = st.button("Delete", key=f"del_{item_id}")
-
-            if submit and action != "None" and user.strip():
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute(
-                    "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                    (name, action, user.strip(), timestamp, qty)
-                )
-                new_qty = quantity - qty if action == "Check Out" else quantity + qty
-                cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), item_id))
-                conn.commit()
-                st.success(f"{action}: {qty} → {name}")
-                st.rerun()
-
-            if delete and user.strip():
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute(
-                    "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                    (name, "Deleted", user.strip(), timestamp, quantity)
-                )
-                cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item_id,))
-                conn.commit()
-                st.warning(f"Deleted: {name}")
-                st.rerun()
-
-# ------------------- Transactions Tab -------------------
+# ------------------- Transactions Tab (FAST) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
+
     c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        t_item = st.text_input("Item", key="t_item")
-    with c2:
-        t_user = st.text_input("User", key="t_user")
-    with c3:
-        t_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="t_action")
-    with c4:
-        t_qty = st.number_input("Qty", min_value=0, step=1, key="t_qty", value=0)
+    with c1: t_item = st.text_input("Item", key="t_item")
+    with c2: t_user = st.text_input("User", key="t_user")
+    with c3: t_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="t_action")
+    with c4: t_qty = st.number_input("Qty", min_value=0, step=1, key="t_qty", value=0)
 
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
     end_date = st.date_input("To", value=datetime.today(), key="t_end")
 
-    tx_query = """
-    SELECT * FROM transactions 
-    WHERE timestamp BETWEEN ? AND ?
-    """
-    tx_params = [
-        start_date.strftime("%Y-%m-%d"),
-        f"{end_date.strftime('%Y-%m-%d')} 23:59:59"
-    ]
+    @st.cache_data(ttl=60)
+    def load_transactions(item="", user="", action="All", qty=0, s=start_date, e=end_date):
+        q = "SELECT * FROM transactions WHERE timestamp BETWEEN ? AND ?"
+        p = [s.strftime("%Y-%m-%d"), f"{e.strftime('%Y-%m-%d')} 23:59:59"]
+        if item: q += " AND item LIKE ?"; p.append(f"%{item}%")
+        if user: q += " AND user LIKE ?"; p.append(f"%{user}%")
+        if action != "All": q += " AND action = ?"; p.append(action)
+        if qty > 0: q += " AND qty = ?"; p.append(qty)
+        q += " ORDER BY timestamp DESC LIMIT 1000"
+        return pd.read_sql_query(q, conn, params=p)
 
-    if t_item:
-        tx_query += " AND item LIKE ?"
-        tx_params.append(f"%{t_item}%")
-    if t_user:
-        tx_query += " AND user LIKE ?"
-        tx_params.append(f"%{t_user}%")
-    if t_action != "All":
-        tx_query += " AND action = ?"
-        tx_params.append(t_action)
-    if t_qty > 0:
-        tx_query += " AND qty = ?"
-        tx_params.append(t_qty)
+    df_tx = load_transactions(t_item, t_user, t_action, t_qty)
 
-    tx_query += " ORDER BY timestamp DESC"
-    df_tx = pd.read_sql_query(tx_query, conn, params=tx_params)
+    if df_tx.empty:
+        st.info("No transactions found.")
+    else:
+        st.dataframe(
+            df_tx[['timestamp', 'action', 'qty', 'item', 'user']],
+            use_container_width=True,
+            hide_index=True
+        )
 
-    st.write(f"**{len(df_tx)} transactions**")
-    for _, log in df_tx.iterrows():
-        st.write(f"**{log['timestamp']}** — {log['action']} **{log['qty']}** of *{log['item']}* by **{log['user']}**")
-
-# ------------------- Reports Tab -------------------
+# ------------------- Reports Tab (ON-DEMAND) -------------------
 with tab_reports:
     st.subheader("Generate Report")
     locations = get_locations()
@@ -223,56 +224,49 @@ with tab_reports:
         generate = st.form_submit_button("Generate Report")
 
     if generate:
-        q = """
-        SELECT 
-            rowid AS id,
-            location,
-            item,
-            notes,
-            quantity
-        FROM inventory
-        WHERE 1=1
-        """
-        p = []
+        @st.cache_data
+        def build_report(pfx, cust, zero_only, s, e):
+            q = """
+            SELECT rowid AS id, location, item, notes, quantity
+            FROM inventory
+            WHERE 1=1
+            """
+            p = []
+            if pfx != "All":
+                q += " AND location LIKE ?"
+                p.append(f"{pfx}%")
+            if cust:
+                q += " AND location LIKE ?"
+                p.append(f"%{cust}%")
+            if zero_only:
+                q += " AND quantity = 0"
+            df = pd.read_sql_query(q, conn, params=p)
 
-        if prefix != "All":
-            q += " AND location LIKE ?"
-            p.append(f"{prefix}%")
-        if custom_loc:
-            q += " AND location LIKE ?"
-            p.append(f"%{custom_loc}%")
-        if zero_only:
-            q += " AND quantity = 0"
+            last_tx = pd.read_sql_query("""
+                SELECT item, MAX(timestamp) as last_tx 
+                FROM transactions 
+                GROUP BY item
+            """, conn)
+            df = df.merge(last_tx, on='item', how='left')
+            df['last_tx'] = pd.to_datetime(df['last_tx'], errors='coerce')
+            mask = df['last_tx'].isna() | ((df['last_tx'] >= pd.Timestamp(s)) & (df['last_tx'] <= pd.Timestamp(e)))
+            return df[mask]
 
-        df_inv = pd.read_sql_query(q, conn, params=p)
-
-        # Last transaction per item
-        last_tx = pd.read_sql_query("""
-            SELECT item, MAX(timestamp) as last_tx 
-            FROM transactions 
-            GROUP BY item
-        """, conn)
-        df_report = df_inv.merge(last_tx, on='item', how='left')
-        df_report['last_tx'] = pd.to_datetime(df_report['last_tx'], errors='coerce')
-
-        # Date filter
-        mask = (df_report['last_tx'].isna()) | \
-               ((df_report['last_tx'] >= pd.Timestamp(r_start)) & 
-                (df_report['last_tx'] <= pd.Timestamp(r_end)))
-        df_report = df_report[mask]
+        df_report = build_report(prefix, custom_loc, zero_only, r_start, r_end)
 
         if df_report.empty:
-            st.warning("No items match the filters.")
+            st.warning("No data matches the selected filters.")
         else:
             st.write("### Report Preview")
             display_cols = ['location', 'item', 'quantity', 'notes', 'last_tx']
-            st.dataframe(df_report[display_cols])
+            st.dataframe(df_report[display_cols], use_container_width=True)
 
             # In-memory PDF
             buffer = io.BytesIO()
             doc = fitz.open()
-            page = doc.new_page(width=800, height=1000)
-            text = "CNC1 Tool Crib Report\n\n" + df_report[display_cols].to_string(index=False)
+            page = doc.new_page(width=800, height=1100)
+            text = "CNC1 Tool Crib Inventory Report\n\n" + \
+                   df_report[['location', 'item', 'quantity', 'last_tx']].to_string(index=False)
             page.insert_text((50, 50), text, fontsize=9)
             doc.save(buffer)
             doc.close()
