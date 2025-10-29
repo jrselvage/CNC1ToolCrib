@@ -186,14 +186,16 @@ with tab_transactions:
 # ---------------- Reports Tab ----------------
 with tab_reports:
     st.subheader("Generate Inventory Report")
+
+    # Move this function OUTSIDE the form block
+    @st.cache_data
+    def get_locations():
+        cursor.execute("SELECT DISTINCT location FROM inventory")
+        return sorted(set([loc[0] for loc in cursor.fetchall()]))
+
+    locations = get_locations()
+
     with st.form("report_form"):
-       @st.cache_data
-def get_locations():
-    cursor.execute("SELECT DISTINCT location FROM inventory")
-    return sorted(set([loc[0] for loc in cursor.fetchall()]))
-
-locations = get_locations()
-
         prefixes = sorted(set([loc[:2] for loc in locations if len(loc) >= 2]))
         selected_prefix = st.selectbox("Select location prefix", ["All"] + prefixes, key="report_prefix")
         custom_filter = st.text_input("Or enter custom location text", key="report_custom_filter")
@@ -231,9 +233,13 @@ locations = get_locations()
             st.write("### Report Preview")
             st.dataframe(df_report)
 
-            excel_path = "inventory_report.xlsx"
-            df_report.to_excel(excel_path, index=False)
+            # Use in-memory Excel export
+            import io
+            excel_buffer = io.BytesIO()
+            df_report.to_excel(excel_buffer, index=False, engine='openpyxl')
+            st.download_button("Download Excel Report", data=excel_buffer.getvalue(), file_name="inventory_report.xlsx")
 
+            # PDF generation (optional optimization)
             pdf_path = "inventory_report.pdf"
             doc = fitz.open()
             text = "Inventory Report\n\n" + df_report.to_string(index=False)
@@ -243,10 +249,5 @@ locations = get_locations()
             doc.close()
 
             st.subheader("📥 Download Report")
-            with open(excel_path, "rb") as f:
-                st.download_button("Download Excel Report", f, file_name=excel_path)
             with open(pdf_path, "rb") as f:
                 st.download_button("Download PDF Report", f, file_name=pdf_path)
-
-# Close connection
-conn.close()
