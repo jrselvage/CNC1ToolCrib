@@ -75,7 +75,7 @@ def get_locations():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
     return sorted(df['location'].dropna().unique().tolist())
 
-# ------------------- Inventory Tab (FAST + PAGINATED) -------------------
+# ------------------- Inventory Tab (ALL RESULTS, NO PAGINATION) -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
 
@@ -113,18 +113,10 @@ with tab_inventory:
     if df.empty:
         st.info("No items found.")
     else:
-        # Pagination
-        items_per_page = 25
-        total_items = len(df)
-        total_pages = (total_items + items_per_page - 1) // items_per_page
-        page = st.selectbox("Page", options=list(range(1, total_pages + 1)), key="inv_page")
-        start_idx = (page - 1) * items_per_page
-        end_idx = start_idx + items_per_page
-        df_page = df.iloc[start_idx:end_idx]
+        st.write(f"**Found {len(df)} item(s)**")
 
-        st.write(f"**Showing {start_idx + 1}–{min(end_idx, total_items)} of {total_items} items**")
-
-        for _, row in df_page.iterrows():
+        # Show ALL results in expanders
+        for _, row in df.iterrows():
             item_id = row['id']
             location = row['location']
             name = row['item']
