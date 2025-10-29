@@ -115,7 +115,7 @@ with tab_inventory:
     else:
         st.write(f"**Found {len(df)} item(s)**")
 
-        # Show ALL results in expanders
+        # SHOW ALL RESULTS — NO PAGINATION
         for _, row in df.iterrows():
             item_id = row['id']
             location = row['location']
