@@ -8,13 +8,7 @@ import re
 import os
 
 os.system("streamlit run_app.py")
-
-# Try using a network drive path first
-network_db_path = r"Z:\Shared\CNC1 Tool Crib Inventory Database\inventory.db"  # UNC path
-local_db_path = "inventory.db"
-
-# Use network path if it exists, otherwise fallback to local
-db_path = network_db_path if os.path.exists(network_db_path) else local_db_path
+db_path = "inventory.db
 
 # Connect to the database
 
@@ -27,6 +21,15 @@ cursor = conn.cursor()
 
 
 # Page configuration
+
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect("inventory.db", check_same_thread=False)
+
+conn = get_connection()
+cursor = conn.cursor()
+
+
 st.set_page_config(page_title="CNC1 Tool Crib Inventory Manager", layout="wide")
 st.title("📦 CNC1 Tool Crib Inventory Management System")
 # ---------------- Sidebar: Add New Item ----------------
@@ -184,16 +187,17 @@ with tab_transactions:
         st.write(f"🕒 {timestamp} — **{action}** {qty} of '{item_name}' by {user_name}")
 
 # ---------------- Reports Tab ----------------
-with tab_reports:
-    st.subheader("Generate Inventory Report")
-
-    # Move this function OUTSIDE the form block
+ # Move this function OUTSIDE the form block
     @st.cache_data
     def get_locations():
         cursor.execute("SELECT DISTINCT location FROM inventory")
         return sorted(set([loc[0] for loc in cursor.fetchall()]))
 
     locations = get_locations()
+with tab_reports:
+    st.subheader("Generate Inventory Report")
+
+   
 
     with st.form("report_form"):
         prefixes = sorted(set([loc[:2] for loc in locations if len(loc) >= 2]))
@@ -234,10 +238,14 @@ with tab_reports:
             st.dataframe(df_report)
 
             # Use in-memory Excel export
-            import io
-            excel_buffer = io.BytesIO()
-            df_report.to_excel(excel_buffer, index=False, engine='openpyxl')
-            st.download_button("Download Excel Report", data=excel_buffer.getvalue(), file_name="inventory_report.xlsx")
+            pdf_buffer = io.BytesIO()
+            doc = fitz.open()
+            text = "Inventory Report\n\n" + df_report.to_string(index=False)
+            page = doc.new_page()
+            page.insert_text((72, 72), text, fontsize=10)
+            doc.save(pdf_buffer)
+            doc.close()
+            st.download_button("Download PDF Report", data=pdf_buffer.getvalue(), file_name="inventory_report.pdf")
 
             # PDF generation (optional optimization)
             pdf_path = "inventory_report.pdf"
