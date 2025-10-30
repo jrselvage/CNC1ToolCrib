@@ -72,23 +72,31 @@ with st.sidebar.form("add_item_form"):
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Helper: Cached locations (lazy) -------------------
+# ------------------- Helper: Get Cabinets & Drawers -------------------
 @st.cache_data(ttl=300)
-def _get_locations():
+def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
-    return sorted(df['location'].dropna().unique().tolist())
+    locations = df['location'].dropna().unique().tolist()
+    
+    # Extract cabinet (first 3 digits if numeric)
+    cabinets = sorted({
+        loc[:3] for loc in locations
+        if len(loc) >= 3 and loc[:3].isdigit()
+    })
+    
+    # Extract drawer (after cabinet number)
+    drawers = sorted({
+        loc[3:].strip() for loc in locations
+        if len(loc) > 3 and loc[:3].isdigit() and loc[3:].strip()
+    })
+    
+    return cabinets, drawers
 
-def get_locations():
-    return _get_locations()
+cabinets, drawers = get_cabinets_and_drawers()
 
-# ------------------- INVENTORY TAB (DEFAULT EMPTY + DROPDOWNS) -------------------
+# ------------------- INVENTORY TAB (CORRECT DROPDOWNS) -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
-
-    # Get unique cabinets and drawers
-    locations = get_locations()
-    cabinets = sorted({loc[:3] for loc in locations if len(loc) >= 3 and loc[:3].isdigit()})  # e.g., "105"
-    drawers = sorted({loc[3:] for loc in locations if len(loc) > 3 and loc[:3].isdigit()})  # e.g., "A"
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -102,7 +110,7 @@ with tab_inventory:
     with col4:
         qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
 
-    # Only run query if ANY filter is applied
+    # Only run search if any filter is active
     has_filter = search_name or (cabinet != "All") or (drawer != "All") or (qty_filter > 0)
 
     if not has_filter:
@@ -112,10 +120,22 @@ with tab_inventory:
         def load_inventory(name="", cab="All", drw="All", qty=0):
             q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
             p = []
-            if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
-            if cab != "All": q += " AND location LIKE ?"; p.append(f"{cab}%")
-            if drw != "All": q += " AND location LIKE ?"; p.append(f"%{cab}{drw}")
-            if qty > 0: q += " AND quantity = ?"; p.append(qty)
+            if name:
+                q += " AND item LIKE ?"
+                p.append(f"%{name}%")
+            if cab != "All":
+                q += " AND location LIKE ?"
+                p.append(f"{cab}%")
+            if drw != "All" and cab != "All":
+                q += " AND location LIKE ?"
+                p.append(f"{cab}{drw}")
+            elif drw != "All" and cab == "All":
+                # If only drawer is selected, search across all cabinets
+                q += " AND location LIKE ?"
+                p.append(f"%{drw}")
+            if qty > 0:
+                q += " AND quantity = ?"
+                p.append(qty)
             q += " ORDER BY location, item"
             return pd.read_sql_query(q, conn, params=p)
 
@@ -165,7 +185,7 @@ with tab_inventory:
                         st.warning("Deleted")
                         st.rerun()
 
-# ------------------- TRANSACTIONS TAB (INSTANT) -------------------
+# ------------------- TRANSACTIONS TAB (UNCHANGED) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
     c1, c2, c3, c4 = st.columns(4)
@@ -199,11 +219,16 @@ with tab_transactions:
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
 
-# ------------------- REPORTS TAB (ON-DEMAND) -------------------
+# ------------------- REPORTS TAB (UNCHANGED) -------------------
 with tab_reports:
     st.subheader("Generate Report")
 
-    locations = get_locations()
+    @st.cache_data(ttl=300)
+    def _get_locations():
+        df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
+        return sorted(df['location'].dropna().unique().tolist())
+
+    locations = _get_locations()
     prefixes = sorted({loc[:2] for loc in locations if len(loc) >= 2})
 
     with st.form("report_form"):
