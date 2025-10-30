@@ -245,7 +245,6 @@ with tab_reports:
             last.rename(columns={"timestamp":"last_tx"}, inplace=True)
             df = df.merge(last, on="item", how="left")
         else:
-           
             df["last_tx"] = pd.NA
 
         if df.empty:
