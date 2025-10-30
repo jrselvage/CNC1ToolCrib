@@ -5,16 +5,17 @@ import fitz
 from datetime import datetime, timedelta
 import io
 import re
-import shutil  # <-- IMPORT HERE
+import shutil
+import os
 
-# ------------------- AUTO BACKUP FUNCTION -------------------
+# ------------------- AUTO BACKUP -------------------
 def backup_db():
     try:
         shutil.copy("inventory.db", "inventory_backup.db")
     except Exception as e:
-        pass  # Silent fail if backup not possible
+        pass  # Silent fail
 
-# ------------------- Database Setup -------------------
+# ------------------- SAFE DB CONNECTION -------------------
 DB_PATH = "inventory.db"
 
 @st.cache_resource
@@ -27,38 +28,50 @@ def get_connection():
 conn = get_connection()
 cursor = conn.cursor()
 
-# Create tables
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS inventory (
-    location TEXT,
-    item TEXT,
-    notes TEXT,
-    quantity INTEGER
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS transactions (
-    item TEXT,
-    action TEXT,
-    user TEXT,
-    timestamp TEXT,
-    qty INTEGER
-)
-""")
-
-# Indexes
-for idx in [
-    "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
-    "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
-    "CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)",
-    "CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)"
-]:
-    cursor.execute(idx)
-conn.commit()
+# ------------------- CREATE TABLES ONLY IF MISSING -------------------
+cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory'")
+if not cursor.fetchone():
+    cursor.execute("""
+    CREATE TABLE inventory (
+        location TEXT,
+        item TEXT,
+        notes TEXT,
+        quantity INTEGER
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE transactions (
+        item TEXT,
+        action TEXT,
+        user TEXT,
+        timestamp TEXT,
+        qty INTEGER
+    )
+    """)
+    # Indexes
+    for idx in [
+        "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
+        "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
+        "CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)",
+        "CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)"
+    ]:
+        cursor.execute(idx)
+    conn.commit()
+    st.success("Database initialized!")
 
 # ------------------- Page Config -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory Management System")
+
+# ------------------- DEBUG: CHECK DATABASE STATUS -------------------
+if st.button("CHECK DATABASE STATUS"):
+    if os.path.exists(DB_PATH):
+        size = os.path.getsize(DB_PATH)
+        item_count = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0, 0]
+        tx_count = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0, 0]
+        st.success(f"DB LOADED! Size: {size:,} bytes | Items: {item_count} | Transactions: {tx_count}")
+    else:
+        st.error("inventory.db NOT FOUND")
 
 # ------------------- Sidebar: Add Item -------------------
 st.sidebar.header("Add New Inventory Item")
@@ -75,14 +88,14 @@ with st.sidebar.form("add_item_form"):
             (new_location, new_item.strip(), new_notes.strip(), int(new_quantity))
         )
         conn.commit()
-        backup_db()  # BACKUP AFTER ADD
+        backup_db()
         st.sidebar.success(f"Added: {new_item}")
         st.rerun()
 
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Helper: Parse Cabinets & Drawers (NUMERIC SORT) -------------------
+# ------------------- Cabinets & Drawers (Numeric Sort) -------------------
 @st.cache_data(ttl=300)
 def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
@@ -90,26 +103,22 @@ def get_cabinets_and_drawers():
 
     cabinet_nums = set()
     drawers = set()
-
     pattern = re.compile(r'^(\d+)(.*)$', re.IGNORECASE)
 
     for loc in locations:
         match = pattern.match(loc)
         if match:
-            cabinet_num = match.group(1)
-            drawer = match.group(2).strip()
             try:
-                cabinet_nums.add(int(cabinet_num))
-            except ValueError:
+                cabinet_nums.add(int(match.group(1)))
+            except:
                 pass
+            drawer = match.group(2).strip()
             if drawer:
                 drawers.add(drawer)
         else:
             drawers.add(loc)
 
-    cabinets_sorted = sorted(cabinet_nums)
-    cabinets_str = [str(c) for c in cabinets_sorted]
-
+    cabinets_str = [str(c) for c in sorted(cabinet_nums)]
     return cabinets_str, sorted(drawers)
 
 cabinets, drawers = get_cabinets_and_drawers()
@@ -117,52 +126,37 @@ cabinets, drawers = get_cabinets_and_drawers()
 # ------------------- INVENTORY TAB -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        search_name = st.text_input("Item Name (optional)", key="inv_name", placeholder="Leave blank to search by location only")
+        search_name = st.text_input("Item Name (optional)", key="inv_name", placeholder="Leave blank to search by location")
     with col2:
-        cabinet_options = ["All"] + cabinets
-        cabinet = st.selectbox("Cabinet", options=cabinet_options, index=0, key="inv_cabinet")
+        cabinet = st.selectbox("Cabinet", ["All"] + cabinets, key="inv_cabinet")
     with col3:
-        drawer_options = ["All"] + drawers
-        drawer = st.selectbox("Drawer", options=drawer_options, index=0, key="inv_drawer")
+        drawer = st.selectbox("Drawer", ["All"] + drawers, key="inv_drawer")
     with col4:
         qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
 
     has_filter = search_name or (cabinet != "All") or (drawer != "All") or (qty_filter > 0)
-
     if not has_filter:
-        st.info("Select a cabinet, drawer, or enter an item name to search.")
+        st.info("Select a filter to search.")
     else:
         @st.cache_data(ttl=60)
         def load_inventory(name="", cab="All", drw="All", qty=0):
             q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
             p = []
-            if name:
-                q += " AND item LIKE ?"
-                p.append(f"%{name}%")
-            if cab != "All" and drw != "All":
-                q += " AND location LIKE ?"
-                p.append(f"{cab}{drw}")
-            elif cab != "All":
-                q += " AND location LIKE ?"
-                p.append(f"{cab}%")
-            elif drw != "All":
-                q += " AND location LIKE ?"
-                p.append(f"%{drw}")
-            if qty > 0:
-                q += " AND quantity = ?"
-                p.append(qty)
+            if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
+            if cab != "All" and drw != "All": q += " AND location LIKE ?"; p.append(f"{cab}{drw}")
+            elif cab != "All": q += " AND location LIKE ?"; p.append(f"{cab}%")
+            elif drw != "All": q += " AND location LIKE ?"; p.append(f"%{drw}")
+            if qty > 0: q += " AND quantity = ?"; p.append(qty)
             q += " ORDER BY location, item"
             return pd.read_sql_query(q, conn, params=p)
 
         df = load_inventory(search_name, cabinet, drawer, qty_filter)
-
         if df.empty:
-            st.warning("No items match your search.")
+            st.warning("No items found.")
         else:
-            st.write(f"**Found {len(df)} item(s)**")
+            st.write(f"**{len(df)} item(s) found**")
             for _, row in df.iterrows():
                 with st.expander(f"{row['item']} @ {row['location']} — Qty: {row['quantity']}"):
                     col1, col2 = st.columns([3, 1])
@@ -171,10 +165,9 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
-                            backup_db()  # BACKUP AFTER NOTES
+                            backup_db()
                             st.success("Saved")
                             st.rerun()
-
                     action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
                     user = st.text_input("Your Name", key=f"u_{row['id']}")
                     qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{row['id']}", value=1)
@@ -192,7 +185,7 @@ with tab_inventory:
                         new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
-                        backup_db()  # BACKUP AFTER CHECK OUT/IN
+                        backup_db()
                         st.success(f"{action}: {qty}")
                         st.rerun()
 
@@ -202,7 +195,7 @@ with tab_inventory:
                                        (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
-                        backup_db()  # BACKUP AFTER DELETE
+                        backup_db()
                         st.warning("Deleted")
                         st.rerun()
 
@@ -220,7 +213,7 @@ with tab_transactions:
     end_date = st.date_input("To", value=today, key="t_end")
 
     start_str = start_date.strftime("%Y-%m-%d 00:00:00")
-    end_str   = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    end_str = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     @st.cache_data(ttl=60)
     def load_transactions(item="", user="", action="All", qty=0, s=start_str, e=end_str):
@@ -234,7 +227,6 @@ with tab_transactions:
         return pd.read_sql_query(q, conn, params=p)
 
     df_tx = load_transactions(t_item, t_user, t_action, t_qty)
-
     if df_tx.empty:
         st.info("No transactions found.")
     else:
@@ -243,7 +235,6 @@ with tab_transactions:
 # ------------------- REPORTS TAB -------------------
 with tab_reports:
     st.subheader("Generate Report")
-
     @st.cache_data(ttl=300)
     def _get_locations():
         df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
@@ -262,7 +253,7 @@ with tab_reports:
 
     if generate:
         r_start_str = r_start.strftime("%Y-%m-%d 00:00:00")
-        r_end_str   = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+        r_end_str = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
         @st.cache_data
         def build_report(pfx, cust, zero_only, s, e):
@@ -275,8 +266,7 @@ with tab_reports:
 
             last_tx = pd.read_sql_query("""
                 SELECT item, MAX(timestamp) as last_tx
-                FROM transactions
-                WHERE timestamp BETWEEN ? AND ?
+                FROM transactions WHERE timestamp BETWEEN ? AND ?
                 GROUP BY item
             """, conn, params=[s, e])
             df = df.merge(last_tx, on='item', how='left')
