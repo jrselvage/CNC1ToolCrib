@@ -105,6 +105,64 @@ with open(DB_PATH, "rb") as f:
     )
 
 # -------------------------------------------------
+#  ADMIN PANEL – TOGGLE QUANTITY 0 to 1 (PASSWORD PROTECTED)
+# -------------------------------------------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("Admin Tools")
+
+# CHANGE THIS PASSWORD!
+ADMIN_PASSWORD = "surgeprotection"
+
+if 'admin_authenticated' not in st.session_state:
+    st.session_state.admin_authenticated = False
+
+with st.sidebar.expander("Admin: Toggle 0 to 1", expanded=False):
+    if not st.session_state.admin_authenticated:
+        pwd = st.text_input("Enter Admin Password", type="password", key="admin_pwd")
+        if st.button("Login", key="admin_login"):
+            if pwd == ADMIN_PASSWORD:
+                st.session_state.admin_authenticated = True
+                st.success("Authenticated")
+                st.rerun()
+            else:
+                st.error("Wrong password")
+    else:
+        st.success("Authenticated")
+        if st.button("Logout", key="admin_logout"):
+            st.session_state.admin_authenticated = False
+            st.rerun()
+
+        # Toggle interface
+        st.markdown("**Toggle quantities between 0 and 1**")
+        cabinets = get_cabinets()
+        drawers = get_drawers()
+
+        toggle_cab = st.selectbox("Cabinet", ["All"] + cabinets, key="toggle_cab")
+        toggle_drw = st.selectbox("Drawer", ["All"] + drawers, key="toggle_drw")
+
+        if st.button("Toggle 0 to 1 for Filtered Items", type="primary"):
+            with st.spinner("Updating..."):
+                q = "SELECT rowid, quantity FROM inventory WHERE 1=1"
+                p = []
+                if toggle_cab != "All" and toggle_drw != "All":
+                    q += " AND location = ?"; p.append(f"{toggle_cab}{toggle_drw}")
+                elif toggle_cab != "All":
+                    q += " AND location LIKE ?"; p.append(f"{toggle_cab}%")
+                elif toggle_drw != "All":
+                    q += " AND location LIKE ?"; p.append(f"%{toggle_drw}")
+
+                cur.execute(q, p)
+                rows = cur.fetchall()
+                updated = 0
+                for rowid, qty in rows:
+                    new_qty = 1 if qty == 0 else 0
+                    cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (new_qty, rowid))
+                    updated += 1
+                conn.commit()
+                st.success(f"Toggled {updated} item(s): 0 to 1")
+                st.rerun()
+
+# -------------------------------------------------
 #  TABS
 # -------------------------------------------------
 tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
