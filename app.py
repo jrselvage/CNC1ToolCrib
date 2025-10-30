@@ -4,6 +4,7 @@ import pandas as pd
 import fitz
 from datetime import datetime, timedelta
 import io
+import re
 
 # ------------------- Database Setup -------------------
 DB_PATH = "inventory.db"
@@ -72,35 +73,42 @@ with st.sidebar.form("add_item_form"):
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Helper: Get Cabinets & Drawers -------------------
+# ------------------- Helper: Parse Cabinets & Drawers -------------------
 @st.cache_data(ttl=300)
 def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
-    locations = df['location'].dropna().unique().tolist()
-    
-    # Extract cabinet (first 3 digits if numeric)
-    cabinets = sorted({
-        loc[:3] for loc in locations
-        if len(loc) >= 3 and loc[:3].isdigit()
-    })
-    
-    # Extract drawer (after cabinet number)
-    drawers = sorted({
-        loc[3:].strip() for loc in locations
-        if len(loc) > 3 and loc[:3].isdigit() and loc[3:].strip()
-    })
-    
-    return cabinets, drawers
+    locations = [loc.strip().upper() for loc in df['location'].dropna().unique() if loc.strip()]
+
+    cabinets = set()
+    drawers = set()
+
+    # Regex: capture leading numbers as cabinet, rest as drawer
+    pattern = re.compile(r'^(\d+)(.*)$', re.IGNORECASE)
+
+    for loc in locations:
+        match = pattern.match(loc)
+        if match:
+            cabinet = match.group(1)  # e.g., "105"
+            drawer = match.group(2).strip()  # e.g., "A", "B", "TOP"
+            if cabinet:
+                cabinets.add(cabinet)
+            if drawer:
+                drawers.add(drawer)
+        else:
+            # Fallback: treat whole as drawer if no numbers
+            drawers.add(loc)
+
+    return sorted(cabinets), sorted(drawers)
 
 cabinets, drawers = get_cabinets_and_drawers()
 
-# ------------------- INVENTORY TAB (CORRECT DROPDOWNS) -------------------
+# ------------------- INVENTORY TAB (FULLY WORKING) -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        search_name = st.text_input("Item Name", key="inv_name", placeholder="Start typing...")
+        search_name = st.text_input("Item Name (optional)", key="inv_name", placeholder="Leave blank to search by location only")
     with col2:
         cabinet_options = ["All"] + cabinets
         cabinet = st.selectbox("Cabinet", options=cabinet_options, index=0, key="inv_cabinet")
@@ -110,32 +118,36 @@ with tab_inventory:
     with col4:
         qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
 
-    # Only run search if any filter is active
+    # Only show results if any filter is used
     has_filter = search_name or (cabinet != "All") or (drawer != "All") or (qty_filter > 0)
 
     if not has_filter:
-        st.info("Enter an item name, select a cabinet/drawer, or set a quantity to search.")
+        st.info("Select a cabinet, drawer, or enter an item name to search.")
     else:
         @st.cache_data(ttl=60)
         def load_inventory(name="", cab="All", drw="All", qty=0):
             q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
             p = []
+
             if name:
                 q += " AND item LIKE ?"
                 p.append(f"%{name}%")
-            if cab != "All":
-                q += " AND location LIKE ?"
-                p.append(f"{cab}%")
-            if drw != "All" and cab != "All":
+
+            # Build location filter
+            if cab != "All" and drw != "All":
                 q += " AND location LIKE ?"
                 p.append(f"{cab}{drw}")
-            elif drw != "All" and cab == "All":
-                # If only drawer is selected, search across all cabinets
+            elif cab != "All":
+                q += " AND location LIKE ?"
+                p.append(f"{cab}%")
+            elif drw != "All":
                 q += " AND location LIKE ?"
                 p.append(f"%{drw}")
+
             if qty > 0:
                 q += " AND quantity = ?"
                 p.append(qty)
+
             q += " ORDER BY location, item"
             return pd.read_sql_query(q, conn, params=p)
 
