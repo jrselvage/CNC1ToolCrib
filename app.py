@@ -1,7 +1,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import fitz  # PyMuPDF
+import fitz
 from datetime import datetime
 import io
 
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 )
 """)
 
-# ------------------- ADD INDEXES FOR SPEED -------------------
+# ------------------- INDEXES (CRITICAL FOR SPEED) -------------------
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)")
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
 cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)")
@@ -75,7 +75,7 @@ def get_locations():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
     return sorted(df['location'].dropna().unique().tolist())
 
-# ------------------- Inventory Tab (ALL RESULTS, NO PAGINATION) -------------------
+# ------------------- INVENTORY TAB (LIGHTNING FAST) -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
 
@@ -115,55 +115,78 @@ with tab_inventory:
     else:
         st.write(f"**Found {len(df)} item(s)**")
 
-        # SHOW ALL RESULTS — NO PAGINATION
-        for _, row in df.iterrows():
-            item_id = row['id']
-            location = row['location']
-            name = row['item']
-            notes = row['notes'] or ""
-            quantity = row['quantity']
+        # FAST: Use data_editor with edit button
+        df_display = df.copy()
+        df_display['Actions'] = ""
 
-            with st.expander(f"{name} @ {location} — Qty: {quantity}"):
-                col1, col2 = st.columns([3, 1])
+        edited_df = st.data_editor(
+            df_display,
+            column_config={
+                "Actions": st.column_config.TextColumn("Actions", disabled=True),
+                "notes": st.column_config.TextColumn("Notes", width="medium"),
+                "quantity": st.column_config.NumberColumn("Qty", format="%d")
+            },
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic"
+        )
+
+        # Handle actions via modal
+        if st.session_state.get("show_action_modal"):
+            with st.form("action_form"):
+                item = st.session_state.selected_item
+                row = df[df['id'] == item['id']].iloc[0]
+                st.write(f"**{row['item']} @ {row['location']}** — Current Qty: {row['quantity']}")
+
+                action = st.selectbox("Action", ["Check Out", "Check In", "Edit Notes", "Delete"], key="modal_action")
+                user = st.text_input("Your Name", key="modal_user")
+
+                if action == "Edit Notes":
+                    new_notes = st.text_area("Notes", value=row['notes'] or "", key="modal_notes")
+                else:
+                    qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="modal_qty")
+
+                col1, col2 = st.columns(2)
                 with col1:
-                    edited_notes = st.text_area("Notes", value=notes, key=f"n_{item_id}", height=70)
-                    if st.button("Save Notes", key=f"s_{item_id}"):
-                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), item_id))
-                        conn.commit()
-                        st.success("Notes saved")
-                        st.rerun()
+                    submit = st.form_submit_button("Confirm")
+                with col2:
+                    cancel = st.form_submit_button("Cancel")
 
-                action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{item_id}")
-                user = st.text_input("Your Name", key=f"u_{item_id}")
-                qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{item_id}", value=1)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    submit = st.button("Submit", key=f"sub_{item_id}")
-                with c2:
-                    delete = st.button("Delete", key=f"del_{item_id}")
-
-                if submit and action != "None" and user.strip():
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute(
-                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                        (name, action, user.strip(), ts, qty)
-                    )
-                    new_qty = quantity - qty if action == "Check Out" else quantity + qty
-                    cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), item_id))
-                    conn.commit()
-                    st.success(f"{action}: {qty} of {name}")
+                if cancel:
+                    st.session_state.show_action_modal = False
                     st.rerun()
 
-                if delete and user.strip():
+                if submit and user.strip():
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute(
-                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                        (name, "Deleted", user.strip(), ts, quantity)
-                    )
-                    cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item_id,))
-                    conn.commit()
-                    st.warning(f"Deleted: {name}")
+                    if action == "Edit Notes":
+                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (new_notes.strip(), item['id']))
+                        conn.commit()
+                        st.success("Notes updated")
+                    elif action == "Delete":
+                        cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
+                                       (row['item'], "Deleted", user, ts, row['quantity']))
+                        cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item['id'],))
+                        conn.commit()
+                        st.warning("Item deleted")
+                    else:
+                        cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
+                                       (row['item'], action, user, ts, qty))
+                        new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
+                        cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), item['id']))
+                        conn.commit()
+                        st.success(f"{action}: {qty}")
+                    st.session_state.show_action_modal = False
+                    st.rerun()
+
+        # Add action buttons
+        for _, row in df.iterrows():
+            col1, col2 = st.columns([6, 1])
+            with col1:
+                st.write(f"**{row['item']}** @ `{row['location']}` — Qty: `{row['quantity']}` — {row['notes'] or '*No notes*'}")
+            with col2:
+                if st.button("Actions", key=f"act_{row['id']}"):
+                    st.session_state.show_action_modal = True
+                    st.session_state.selected_item = row.to_dict()
                     st.rerun()
 
 # ------------------- Transactions Tab (FAST) -------------------
@@ -201,7 +224,7 @@ with tab_transactions:
             hide_index=True
         )
 
-# ------------------- Reports Tab (ON-DEMAND) -------------------
+# ------------------- Reports Tab (ON-DEMAND ONLY) -------------------
 with tab_reports:
     st.subheader("Generate Report")
     locations = get_locations()
@@ -218,20 +241,11 @@ with tab_reports:
     if generate:
         @st.cache_data
         def build_report(pfx, cust, zero_only, s, e):
-            q = """
-            SELECT rowid AS id, location, item, notes, quantity
-            FROM inventory
-            WHERE 1=1
-            """
+            q = "SELECT location, item, quantity, notes FROM inventory WHERE 1=1"
             p = []
-            if pfx != "All":
-                q += " AND location LIKE ?"
-                p.append(f"{pfx}%")
-            if cust:
-                q += " AND location LIKE ?"
-                p.append(f"%{cust}%")
-            if zero_only:
-                q += " AND quantity = 0"
+            if pfx != "All": q += " AND location LIKE ?"; p.append(f"{pfx}%")
+            if cust: q += " AND location LIKE ?"; p.append(f"%{cust}%")
+            if zero_only: q += " AND quantity = 0"
             df = pd.read_sql_query(q, conn, params=p)
 
             last_tx = pd.read_sql_query("""
@@ -244,29 +258,27 @@ with tab_reports:
             mask = df['last_tx'].isna() | ((df['last_tx'] >= pd.Timestamp(s)) & (df['last_tx'] <= pd.Timestamp(e)))
             return df[mask]
 
-        df_report = build_report(prefix, custom_loc, zero_only, r_start, r_end)
+        with st.spinner("Generating report..."):
+            df_report = build_report(prefix, custom_loc, zero_only, r_start, r_end)
 
         if df_report.empty:
-            st.warning("No data matches the selected filters.")
+            st.warning("No data matches the filters.")
         else:
             st.write("### Report Preview")
-            display_cols = ['location', 'item', 'quantity', 'notes', 'last_tx']
-            st.dataframe(df_report[display_cols], use_container_width=True)
+            st.dataframe(df_report, use_container_width=True)
 
-            # In-memory PDF
             buffer = io.BytesIO()
             doc = fitz.open()
             page = doc.new_page(width=800, height=1100)
-            text = "CNC1 Tool Crib Inventory Report\n\n" + \
-                   df_report[['location', 'item', 'quantity', 'last_tx']].to_string(index=False)
+            text = "CNC1 Tool Crib Report\n\n" + df_report[['location', 'item', 'quantity', 'last_tx']].to_string(index=False)
             page.insert_text((50, 50), text, fontsize=9)
             doc.save(buffer)
             doc.close()
             buffer.seek(0)
 
             st.download_button(
-                label="Download PDF Report",
-                data=buffer.getvalue(),
-                file_name=f"tool_crib_report_{datetime.now().strftime('%Y%m%d')}.pdf",
-                mime="application/pdf"
+                "Download PDF Report",
+                buffer.getvalue(),
+                f"report_{datetime.now():%Y%m%d}.pdf",
+                "application/pdf"
             )
