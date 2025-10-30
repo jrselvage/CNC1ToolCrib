@@ -50,9 +50,9 @@ with col1:
         st.success(f"Inventory: {inv:,} rows | Transactions: {tx:,} rows")
 
 with col2:
-    # ---- Build Excel in memory ----
+    # ---- Build Excel in memory (xlsxwriter – no openpyxl needed) ----
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         inventory_df.to_excel(writer, sheet_name="Inventory", index=False)
         transactions_df.to_excel(writer, sheet_name="Transactions", index=False)
     output.seek(0)
@@ -68,17 +68,16 @@ with col2:
 uploaded = st.file_uploader("Restore from Excel backup", type=["xlsx"])
 if uploaded:
     try:
-        dfs = pd.read_excel(uploaded, sheet_name=None)  # reads all sheets
+        # pandas can read xlsx without openpyxl if xlsxwriter is present
+        dfs = pd.read_excel(uploaded, sheet_name=None, engine="openpyxl" if "openpyxl" in pd.__dict__ else "xlsxwriter")
         new_inv = dfs.get("Inventory", pd.DataFrame())
         new_tx  = dfs.get("Transactions", pd.DataFrame())
 
-        # basic validation – keep only expected columns
         inv_cols = ["location", "item", "notes", "quantity"]
         tx_cols  = ["item", "action", "user", "timestamp", "qty"]
         new_inv = new_inv[inv_cols].fillna("")
         new_tx  = new_tx[tx_cols].fillna("")
 
-        # overwrite files
         new_inv.to_csv(INVENTORY_CSV, index=False)
         new_tx.to_csv(TRANSACTIONS_CSV, index=False)
 
@@ -120,7 +119,6 @@ with tab_inventory:
     with c3: drawer  = st.selectbox("Drawer",  ["All"] + ["A","B","C","D","E","F"], key="inv_drawer")
     with c4: qty_f   = st.number_input("Exact Qty", min_value=0, value=0, key="inv_qty")
 
-    # ---- Filter ----
     df = inventory_df.copy()
     if search_name:
         df = df[df["item"].str.contains(search_name, case=False, na=False)]
@@ -237,7 +235,6 @@ with tab_reports:
         if custom: df = df[df["location"].str.contains(custom, case=False, na=False)]
         if zero: df = df[df["quantity"].astype(int) == 0]
 
-        # last transaction per item in the period
         tx = transactions_df[(transactions_df["timestamp"] >= r_start_str) &
                             (transactions_df["timestamp"] <= r_end_str)]
         if not tx.empty:
@@ -253,7 +250,6 @@ with tab_reports:
             st.write("### Report Preview")
             st.dataframe(df, use_container_width=True)
 
-            # ---- PDF ----
             buffer = io.BytesIO()
             doc = fitz.open()
             page = doc.new_page(width=800, height=1100)
