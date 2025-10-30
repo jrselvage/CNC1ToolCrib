@@ -71,18 +71,21 @@ with st.sidebar.form("add_form", clear_on_submit=True):
 
     if add and new_item and new_loc:
         clean_loc = re.sub(r'[^0-9A-Z]', '', new_loc)
-        cur.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
-                    (clean_loc, new_item.strip(), new_notes.strip(), int(new_qty)))
-        conn.commit()
-        st.success(f"Added {new_item} @ {clean_loc}")
-        st.rerun()
+        if len(clean_loc) < 4:
+            st.error("Location must be like 105A")
+        else:
+            cur.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
+                        (clean_loc, new_item.strip(), new_notes.strip(), int(new_qty)))
+            conn.commit()
+            st.success(f"Added {new_item} @ {clean_loc}")
+            st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – RESTORE FROM CSV (EXACT COLUMN NAMES)
+#  SIDEBAR – RESTORE FROM CSV (FLEXIBLE COLUMNS)
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Restore from CSV")
-st.sidebar.caption("CSV must have: **Location, Item, quantity, notes** (case-sensitive). `last_tx` is ignored.")
+st.sidebar.caption("**Required:** `Location`, `Item`  \n**Optional:** `quantity`, `notes`, `last_tx`")
 
 inv_csv = st.sidebar.file_uploader("Inventory CSV", type=["csv"], key="inv_csv")
 tx_csv  = st.sidebar.file_uploader("Transactions CSV", type=["csv"], key="tx_csv")
@@ -91,23 +94,15 @@ if inv_csv and tx_csv:
     if st.sidebar.button("Restore Database from CSV", type="primary"):
         with st.spinner("Restoring..."):
             try:
-                # Read with exact column names
                 inv = pd.read_csv(inv_csv)
                 tx  = pd.read_csv(tx_csv)
 
-                # Required columns
-                req_inv = ["Location", "Item", "quantity", "notes"]
-                req_tx  = ["item", "action", "user", "timestamp", "qty"]
-
-                # Check and map
-                if not all(col in inv.columns for col in req_inv):
-                    st.error(f"Inventory CSV missing columns. Need: {', '.join(req_inv)}")
-                    st.stop()
-                if not all(col in tx.columns for col in req_tx):
-                    st.error(f"Transactions CSV missing columns. Need: {', '.join(req_tx)}")
+                # --- INVENTORY: Only Location & Item required ---
+                if 'Location' not in inv.columns or 'Item' not in inv.columns:
+                    st.error("Inventory CSV must have: **Location**, **Item**")
                     st.stop()
 
-                # Rename to internal format
+                # Rename to lowercase
                 inv = inv.rename(columns={
                     "Location": "location",
                     "Item": "item",
@@ -115,36 +110,44 @@ if inv_csv and tx_csv:
                     "notes": "notes"
                 })
 
-                # Normalize location: 105A, 105 A, 105-A → 105A
+                # Normalize location
                 inv['location'] = inv['location'].astype(str).str.strip().str.upper()
                 inv['location'] = inv['location'].str.replace(r'[^0-9A-Z]', '', regex=True)
 
-                # Filter valid locations (at least 3 digits + 1 letter)
+                # Validate format: 105A
                 valid = inv['location'].str.match(r'^\d{3}[A-Z]$')
                 invalid = inv[~valid]
                 if len(invalid) > 0:
-                    st.warning(f"Skipped {len(invalid)} invalid locations:")
+                    st.warning(f"Skipped {len(invalid)} invalid locations (need 105A format):")
                     st.write(invalid[['location']].head())
-
                 inv = inv[valid].copy()
-                inv['quantity'] = pd.to_numeric(inv['quantity'], errors='coerce').fillna(0).astype(int)
 
-                # Clear DB
+                # Fill missing columns
+                inv['quantity'] = pd.to_numeric(inv.get('quantity', 0), errors='coerce').fillna(0).astype(int)
+                inv['notes'] = inv.get('notes', '').fillna("").astype(str)
+
+                # --- TRANSACTIONS ---
+                req_tx = ["item", "action", "user", "timestamp", "qty"]
+                if not all(col in tx.columns for col in req_tx):
+                    st.error(f"Transactions CSV must have: {', '.join(req_tx)}")
+                    st.stop()
+
+                tx['qty'] = pd.to_numeric(tx['qty'], errors='coerce').fillna(0).astype(int)
+
+                # --- CLEAR & INSERT ---
                 cur.execute("DELETE FROM inventory")
                 cur.execute("DELETE FROM transactions")
 
-                # Insert inventory
                 for _, r in inv.iterrows():
                     cur.execute(
                         "INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
                         (r['location'], r['item'], r['notes'], r['quantity'])
                     )
 
-                # Insert transactions
                 for _, r in tx.iterrows():
                     cur.execute(
                         "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?,?,?,?,?)",
-                        (r['item'], r['action'], r['user'], r['timestamp'], int(r['qty']))
+                        (r['item'], r['action'], r['user'], r['timestamp'], r['qty'])
                     )
 
                 conn.commit()
@@ -242,7 +245,7 @@ with tab_inv:
                         st.rerun()
 
 # -------------------------------------------------
-#  TRANSACTIONS & REPORTS (simplified)
+#  TRANSACTIONS & REPORTS
 # -------------------------------------------------
 with tab_tx:
     st.subheader("Recent Transactions")
