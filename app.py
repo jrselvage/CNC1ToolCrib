@@ -5,9 +5,31 @@ import fitz
 from datetime import datetime, timedelta
 import io
 import os
+import requests  # For GitHub download
 
 # ------------------- CONFIG -------------------
 DB_PATH = "inventory.db"
+DB_URL = "https://raw.githubusercontent.com/jrselvage/CNC1ToolCrib/main/inventory.db"
+
+# ------------------- AUTO-DOWNLOAD FROM GITHUB ON START -------------------
+def ensure_db_from_github():
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 1000:
+        st.toast("Using existing local database.")
+        return  # Skip if local DB is valid
+    try:
+        with st.spinner("Downloading database from GitHub..."):
+            r = requests.get(DB_URL, timeout=10)
+            if r.status_code == 200 and len(r.content) > 100:
+                with open(DB_PATH, "wb") as f:
+                    f.write(r.content)
+                st.toast("Database restored from GitHub!")
+            else:
+                st.toast("No valid backup on GitHub. Starting fresh.")
+    except Exception as e:
+        st.toast(f"Download failed: {e}. Starting fresh.")
+
+# Run on startup
+ensure_db_from_github()
 
 # ------------------- DATABASE -------------------
 @st.cache_resource
