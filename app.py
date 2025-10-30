@@ -7,14 +7,20 @@ import io
 import re
 
 
-# TEMP: Add this anywhere in the app (e.g. under the title)
-if st.button("DOWNLOAD CURRENT DATABASE (for backup)"):
-    with open("inventory.db", "rb") as f:
-        st.download_button(
-            "Download inventory.db",
-            f,
-            "inventory.db",
-            "application/octet-stream"
+# Add this function near the top
+def backup_db():
+    import shutil
+    try:
+        shutil.copy("inventory.db", "inventory_backup.db")
+    except:
+        pass
+
+# Call it after every write operation, e.g.:
+if submitted:
+    # ... your insert code ...
+    conn.commit()
+    backup_db()  # Auto-backup
+    st.rerun()
         )
 # ------------------- Database Setup -------------------
 DB_PATH = "inventory.db"
