@@ -13,10 +13,9 @@ def auto_backup():
     """Save inventory.db → inventory_backup.db after every change"""
     try:
         shutil.copy("inventory.db", "inventory_backup.db")
-        # Optional: Show tiny toast
-        st.toast("Auto-backup saved", icon="Success")
+        st.toast("Auto-backup saved")                     # Fixed
     except Exception as e:
-        st.toast(f"Backup failed: {e}", icon="Error")
+        st.toast(f"Backup failed: {e}")                   # Fixed
 
 # ------------------- DATABASE: LOAD OR RESTORE -------------------
 DB_PATH = "inventory.db"
