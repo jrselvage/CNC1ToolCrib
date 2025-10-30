@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import os
 from datetime import datetime, timedelta
 import io
@@ -15,7 +14,6 @@ def load_inventory() -> pd.DataFrame:
     if os.path.exists(INVENTORY_CSV):
         return pd.read_csv(INVENTORY_CSV, dtype=str).fillna("")
     else:
-        # brand-new file – create empty with correct columns
         empty = pd.DataFrame(columns=["location", "item", "notes", "quantity"])
         empty.to_csv(INVENTORY_CSV, index=False)
         return empty
@@ -105,7 +103,6 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             "notes": new_notes.strip(),
             "quantity": int(new_qty)
         }])
-        global inventory_df
         inventory_df = pd.concat([inventory_df, new_row], ignore_index=True)
         save_inventory(inventory_df)
         st.success(f"Added: {new_item}")
@@ -164,7 +161,6 @@ with tab_inventory:
                             "timestamp": ts,
                             "qty": qty
                         }])
-                        global transactions_df
                         transactions_df = pd.concat([transactions_df, new_tx], ignore_index=True)
                         save_transactions(transactions_df)
 
@@ -185,7 +181,6 @@ with tab_inventory:
                             "timestamp": ts,
                             "qty": row["quantity"]
                         }])
-                        global transactions_df
                         transactions_df = pd.concat([transactions_df, del_tx], ignore_index=True)
                         save_transactions(transactions_df)
 
@@ -250,6 +245,7 @@ with tab_reports:
             last.rename(columns={"timestamp":"last_tx"}, inplace=True)
             df = df.merge(last, on="item", how="left")
         else:
+           :
             df["last_tx"] = pd.NA
 
         if df.empty:
