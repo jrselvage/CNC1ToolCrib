@@ -6,6 +6,16 @@ from datetime import datetime, timedelta
 import io
 import re
 
+
+# TEMP: Add this anywhere in the app (e.g. under the title)
+if st.button("DOWNLOAD CURRENT DATABASE (for backup)"):
+    with open("inventory.db", "rb") as f:
+        st.download_button(
+            "Download inventory.db",
+            f,
+            "inventory.db",
+            "application/octet-stream"
+        )
 # ------------------- Database Setup -------------------
 DB_PATH = "inventory.db"
 
@@ -234,6 +244,8 @@ with tab_transactions:
         st.info("No transactions found.")
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
+
+
 
 # ------------------- REPORTS TAB -------------------
 with tab_reports:
