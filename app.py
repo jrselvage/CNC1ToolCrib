@@ -1,6 +1,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import re
 from datetime import datetime
 
 # -------------------------------------------------
@@ -40,45 +41,47 @@ st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
 
 # -------------------------------------------------
-#  HELPERS – CABINETS & DRAWERS FROM DB
+#  HELPERS – EXTRACT 1, 2, OR 3-DIGIT CABINETS
 # -------------------------------------------------
+def extract_cabinet(loc):
+    """Extract first 1–3 digits: 5A → 5, 12B → 12, 105C → 105"""
+    if not loc:
+        return None
+    match = re.search(r'\d{1,3}', str(loc))
+    return match.group(0) if match else None
+
+def extract_drawer(loc):
+    """Extract first letter after digits: 5A → A, 12 B → B"""
+    if not loc:
+        return None
+    match = re.search(r'(?<=\d)[A-Za-z]', str(loc))
+    return match.group(0).upper() if match else None
+
 def get_cabinets():
-    try:
-        df = pd.read_sql_query("""
-            SELECT DISTINCT SUBSTR(location, 1, 3) AS cab
-            FROM inventory 
-            WHERE location GLOB '[0-9][0-9][0-9]*'
-        """, conn)
-        return sorted(df['cab'].dropna().unique().astype(int).astype(str).tolist())
-    except:
-        return []
+    df = pd.read_sql_query("SELECT location FROM inventory", conn)
+    cabs = [extract_cabinet(loc) for loc in df['location']]
+    return sorted({c for c in cabs if c}, key=int)
 
 def get_drawers():
-    try:
-        df = pd.read_sql_query("""
-            SELECT DISTINCT UPPER(SUBSTR(location, 4, 1)) AS drw
-            FROM inventory 
-            WHERE location GLOB '*[A-Za-z]'
-        """, conn)
-        return sorted(df['drw'].dropna().unique().tolist())
-    except:
-        return []
+    df = pd.read_sql_query("SELECT location FROM inventory", conn)
+    drws = [extract_drawer(loc) for loc in df['location']]
+    return sorted({d for d in drws if d})
 
 # -------------------------------------------------
-#  SIDEBAR – ADD ITEM
+#  SIDEBAR – ADD ITEM (SUPPORTS 1–3 DIGIT CABINETS)
 # -------------------------------------------------
 st.sidebar.header("Add New Item")
 with st.sidebar.form("add_form", clear_on_submit=True):
     new_item = st.text_input("Item Name")
-    new_loc = st.text_input("Location (e.g., 105A)").strip().upper()
+    new_loc = st.text_input("Location (e.g., 5A, 12B, 105C)").strip().upper()
     new_qty = st.number_input("Quantity", min_value=0, step=1, value=0)
     new_notes = st.text_area("Notes")
     add = st.form_submit_button("Add Item")
 
     if add and new_item and new_loc:
-        clean_loc = ''.join(c for c in new_loc if c.isalnum())
-        if len(clean_loc) < 4 or not clean_loc[:3].isdigit() or not clean_loc[3].isalpha():
-            st.error("Location must be like 105A")
+        clean_loc = re.sub(r'[^0-9A-Z]', '', new_loc)
+        if not re.match(r'^\d{1,3}[A-Z]$', clean_loc):
+            st.error("Location must be like 5A, 12B, or 105C")
         else:
             cur.execute(
                 "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
@@ -89,7 +92,7 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – DB BACKUP (DOWNLOAD ONLY)
+#  SIDEBAR – DB BACKUP
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Backup")
@@ -110,7 +113,7 @@ except:
 tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 
 # -------------------------------------------------
-#  INVENTORY TAB
+#  INVENTORY TAB – SHOWS 1–3 DIGIT CABINETS
 # -------------------------------------------------
 with tab_inv:
     st.subheader("Search Inventory")
@@ -119,9 +122,9 @@ with tab_inv:
     drawers = get_drawers()
 
     if not cabinets:
-        st.warning("No cabinet numbers found in DB.")
+        st.warning("No cabinet numbers found. Use format like 5A, 12B, 105C.")
     if not drawers:
-        st.info("No drawers found. Use format like 105A.")
+        st.info("No drawers found. Need letter after number (e.g., 5A).")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: name = st.text_input("Item Name", key="s_name")
@@ -137,9 +140,12 @@ with tab_inv:
         q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
         p = []
         if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
-        if cab != "All" and drw != "All": q += " AND location = ?"; p.append(f"{cab}{drw}")
-        elif cab != "All": q += " AND location LIKE ?"; p.append(f"{cab}%")
-        elif drw != "All": q += " AND location LIKE ?"; p.append(f"%{drw}")
+        if cab != "All" and drw != "All":
+            q += " AND location = ?"; p.append(f"{cab}{drw}")
+        elif cab != "All":
+            q += " AND location LIKE ?"; p.append(f"{cab}%")
+        elif drw != "All":
+            q += " AND location LIKE ?"; p.append(f"%{drw}")
         if qty > 0: q += " AND quantity = ?"; p.append(qty)
         q += " ORDER BY location, item"
 
@@ -167,7 +173,7 @@ with tab_inv:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         cur.execute(
                             "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                            (r['item'], act, usr, ts, q_val)
+                            (r['item'], act, usr.strip(), ts, q_val)
                         )
                         new_qty = r['quantity'] - q_val if act == "Check Out" else r['quantity'] + q_val
                         cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (max(0, new_qty), r['id']))
@@ -193,7 +199,7 @@ with tab_rep:
     st.subheader("Full Report")
     df = pd.read_sql_query("SELECT location, item, quantity, notes FROM inventory ORDER BY location", conn)
     if df.empty:
-        st.info("No data.")
+        st.info("No data in inventory.")
     else:
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False).encode()
