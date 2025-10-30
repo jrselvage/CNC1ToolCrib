@@ -3,14 +3,20 @@ import sqlite3
 import pandas as pd
 import re
 from datetime import datetime
+import os
 
 # -------------------------------------------------
-#  CONFIG
+#  AUTO-DETECT DB FILE IN CURRENT DIRECTORY
 # -------------------------------------------------
-DB_PATH = "inventory.db"
+DB_PATH = "inventory.db"  # Same folder as app.py
+
+if not os.path.exists(DB_PATH):
+    st.error(f"Database not found: `{DB_PATH}`\n\n"
+             "Make sure `inventory.db` is in the same folder as `app.py`.")
+    st.stop()
 
 # -------------------------------------------------
-#  DATABASE
+#  DATABASE CONNECTION
 # -------------------------------------------------
 @st.cache_resource
 def get_connection():
@@ -21,7 +27,7 @@ def get_connection():
 conn = get_connection()
 cur = conn.cursor()
 
-# Create tables
+# Create tables if they don't exist
 cur.execute("""CREATE TABLE IF NOT EXISTS inventory (
     location TEXT, item TEXT, notes TEXT, quantity INTEGER
 )""")
@@ -29,31 +35,25 @@ cur.execute("""CREATE TABLE IF NOT EXISTS transactions (
     item TEXT, action TEXT, user TEXT, timestamp TEXT, qty INTEGER
 )""")
 
-# Indexes
+# Indexes for speed
 cur.execute("CREATE INDEX IF NOT EXISTS idx_loc ON inventory(location)")
 cur.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
 conn.commit()
 
 # -------------------------------------------------
-#  PAGE
+#  PAGE CONFIG
 # -------------------------------------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
 
 # -------------------------------------------------
-#  HELPERS – EXTRACT 1, 2, OR 3-DIGIT CABINETS
+#  HELPERS – EXTRACT 1–3 DIGIT CABINETS & DRAWERS
 # -------------------------------------------------
 def extract_cabinet(loc):
-    """Extract first 1–3 digits: 5A → 5, 12B → 12, 105C → 105"""
-    if not loc:
-        return None
     match = re.search(r'\d{1,3}', str(loc))
     return match.group(0) if match else None
 
 def extract_drawer(loc):
-    """Extract first letter after digits: 5A → A, 12 B → B"""
-    if not loc:
-        return None
     match = re.search(r'(?<=\d)[A-Za-z]', str(loc))
     return match.group(0).upper() if match else None
 
@@ -68,7 +68,7 @@ def get_drawers():
     return sorted({d for d in drws if d})
 
 # -------------------------------------------------
-#  SIDEBAR – ADD ITEM (SUPPORTS 1–3 DIGIT CABINETS)
+#  SIDEBAR – ADD ITEM
 # -------------------------------------------------
 st.sidebar.header("Add New Item")
 with st.sidebar.form("add_form", clear_on_submit=True):
@@ -96,16 +96,13 @@ with st.sidebar.form("add_form", clear_on_submit=True):
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Backup")
-try:
-    with open(DB_PATH, "rb") as f:
-        st.sidebar.download_button(
-            "Download DB (.db)",
-            f.read(),
-            file_name=f"backup_{datetime.now():%Y%m%d}.db",
-            mime="application/octet-stream"
-        )
-except:
-    st.sidebar.error("DB not accessible")
+with open(DB_PATH, "rb") as f:
+    st.sidebar.download_button(
+        "Download inventory.db",
+        f.read(),
+        file_name=f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.db",
+        mime="application/octet-stream"
+    )
 
 # -------------------------------------------------
 #  TABS
@@ -113,7 +110,7 @@ except:
 tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 
 # -------------------------------------------------
-#  INVENTORY TAB – SHOWS 1–3 DIGIT CABINETS
+#  INVENTORY TAB
 # -------------------------------------------------
 with tab_inv:
     st.subheader("Search Inventory")
@@ -122,9 +119,10 @@ with tab_inv:
     drawers = get_drawers()
 
     if not cabinets:
-        st.warning("No cabinet numbers found. Use format like 5A, 12B, 105C.")
+        st.warning("No cabinet numbers found in `inventory.db`.\n"
+                   "Add items with locations like `5A`, `12B`, or `105C`.")
     if not drawers:
-        st.info("No drawers found. Need letter after number (e.g., 5A).")
+        st.info("No drawers found. Need a letter after the number (e.g., `5A`).")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: name = st.text_input("Item Name", key="s_name")
@@ -169,7 +167,7 @@ with tab_inv:
                     usr = st.text_input("User", key=f"u_{r['id']}")
                     q_val = st.number_input("Qty", min_value=1, value=1, key=f"q_{r['id']}")
 
-                    if st.button("Submit", key=f"sub_{r['id']}") and act != "None" and usr:
+                    if st.button("Submit", key=f"sub_{r['id']}") and act != "None" and usr.strip():
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         cur.execute(
                             "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
@@ -196,11 +194,16 @@ with tab_tx:
 #  REPORTS TAB
 # -------------------------------------------------
 with tab_rep:
-    st.subheader("Full Report")
+    st.subheader("Full Inventory Report")
     df = pd.read_sql_query("SELECT location, item, quantity, notes FROM inventory ORDER BY location", conn)
     if df.empty:
-        st.info("No data in inventory.")
+        st.info("No items in inventory.")
     else:
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False).encode()
-        st.download_button("Download Report (CSV)", csv, "report.csv", "text/csv")
+        st.download_button(
+            "Download Report (CSV)",
+            csv,
+            file_name=f"inventory_report_{datetime.now():%Y%m%d}.csv",
+            mime="text/csv"
+        )
