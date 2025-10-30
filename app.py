@@ -21,7 +21,6 @@ if submitted:
     conn.commit()
     backup_db()  # Auto-backup
     st.rerun()
-        )
 # ------------------- Database Setup -------------------
 DB_PATH = "inventory.db"
 
