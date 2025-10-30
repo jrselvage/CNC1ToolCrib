@@ -6,15 +6,13 @@ from datetime import datetime, timedelta
 import io
 import re
 import os
-import requests
-import base64
+import requests  # Only kept for download_db() — can remove if not needed
 
-# ------------------- GITHUB CONFIG -------------------
-# REPLACE WITH YOUR REPO
+# ------------------- CONFIG -------------------
 DB_URL = "https://raw.githubusercontent.com/jrselvage/CNC1ToolCrib/main/inventory.db"
 DB_PATH = "inventory.db"
 
-# ------------------- DOWNLOAD DB FROM GITHUB -------------------
+# ------------------- DOWNLOAD DB FROM GITHUB (Optional) -------------------
 def download_db():
     if os.path.exists(DB_PATH):
         return
@@ -30,54 +28,6 @@ def download_db():
         st.toast(f"Download failed: {e}. Starting fresh.")
 
 download_db()
-
-# ------------------- UPLOAD DB TO GITHUB -------------------
-def upload_db():
-    try:
-        token = st.secrets["GITHUB_TOKEN"]
-        repo = st.secrets["REPO"]
-        branch = st.secrets["BRANCH"]
-        api_url = f"https://api.github.com/repos/{repo}/contents/inventory.db"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-
-        # Get current file SHA
-        r = requests.get(api_url, headers=headers)
-        sha = r.json().get("sha") if r.status_code == 200 else None
-
-        # Read DB
-        with open(DB_PATH, "rb") as f:
-            content = f.read()
-        b64 = base64.b64encode(content).decode()
-
-        # Upload
-        data = {
-            "message": f"Auto-save: {datetime.now():%Y-%m-%d %H:%M:%S}",
-            "content": b64,
-            "branch": branch,
-        }
-        if sha:
-            data["sha"] = sha
-
-        r = requests.put(api_url, json=data, headers=headers)
-        if r.status_code in [200, 201]:
-            st.toast("DB saved to GitHub")
-        else:
-            st.toast(f"Upload failed: {r.json().get('message', 'Unknown error')}")
-    except Exception as e:
-        st.toast(f"Upload error: {e}")
-
-        # --- ADMIN: Restore from Backup ---
-st.sidebar.header("Admin: Restore DB")
-uploaded = st.sidebar.file_uploader("Upload inventory.db backup", type=['db'])
-if uploaded:
-    with open(DB_PATH, "wb") as f:
-        f.write(uploaded.getvalue())
-    st.success("DB restored! Restarting...")
-    upload_db()  # Push to GitHub
-    st.rerun()
 
 # ------------------- DATABASE -------------------
 @st.cache_resource
@@ -118,7 +68,7 @@ if not cursor.fetchone():
     ]:
         cursor.execute(idx)
     conn.commit()
-    upload_db()
+    # No upload_db() here
 
 # ------------------- PAGE CONFIG -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
@@ -132,14 +82,20 @@ with col1:
         items = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0,0]
         txs = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0,0]
         st.success(f"DB: {size:,} bytes | {items} items | {txs} txs")
+
 with col2:
-    with open(DB_PATH, "rb") as f:
+    try:
+        with open(DB_PATH, "rb") as f:
+            db_bytes = f.read()
         st.download_button(
-            "DOWNLOAD DB",
-            f,
-            "inventory.db",
-            "application/octet-stream"
+            label="DOWNLOAD DB",
+            data=db_bytes,
+            file_name=f"inventory_backup_{datetime.now():%Y%m%d_%H%M%S}.db",
+            mime="application/octet-stream"
         )
+        st.caption(f"Size: {len(db_bytes):,} bytes")
+    except Exception as e:
+        st.error(f"Failed to read DB: {e}")
 
 # ------------------- ADD ITEM -------------------
 st.sidebar.header("Add New Item")
@@ -156,7 +112,7 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             (new_loc, new_item.strip(), new_notes.strip(), int(new_qty))
         )
         conn.commit()
-        upload_db()
+        # No upload_db()
         st.cache_data.clear()
         st.success(f"Added: {new_item}")
         st.rerun()
@@ -202,7 +158,7 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
-                            upload_db()
+                            # No upload_db()
                             st.cache_data.clear()
                             st.success("Saved")
                             st.rerun()
@@ -219,7 +175,7 @@ with tab_inventory:
                             new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                             cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                             conn.commit()
-                            upload_db()
+                            # No upload_db()
                             st.cache_data.clear()
                             st.success(f"{action}: {qty}")
                             st.rerun()
@@ -230,7 +186,7 @@ with tab_inventory:
                                            (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                             cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                             conn.commit()
-                            upload_db()
+                            # No upload_db()
                             st.cache_data.clear()
                             st.warning("Deleted")
                             st.rerun()
