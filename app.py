@@ -81,11 +81,11 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – RESTORE FROM CSV (FLEXIBLE COLUMNS)
+#  SIDEBAR – RESTORE FROM CSV (ROBUST COLUMN DETECTION)
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Restore from CSV")
-st.sidebar.caption("**Required:** `Location`, `Item`  \n**Optional:** `quantity`, `notes`, `last_tx`")
+st.sidebar.caption("**Required:** `Location`, `Item` (any case, extra spaces OK)  \n**Optional:** `quantity`, `notes`, `last_tx`")
 
 inv_csv = st.sidebar.file_uploader("Inventory CSV", type=["csv"], key="inv_csv")
 tx_csv  = st.sidebar.file_uploader("Transactions CSV", type=["csv"], key="tx_csv")
@@ -97,44 +97,58 @@ if inv_csv and tx_csv:
                 inv = pd.read_csv(inv_csv)
                 tx  = pd.read_csv(tx_csv)
 
-                # --- INVENTORY: Only Location & Item required ---
-                if 'Location' not in inv.columns or 'Item' not in inv.columns:
-                    st.error("Inventory CSV must have: **Location**, **Item**")
+                # --- DEBUG: Show raw columns ---
+                st.write("**Detected Inventory Columns:**")
+                st.write(list(inv.columns))
+
+                # Normalize column names
+                inv.columns = [col.strip() for col in inv.columns]
+                tx.columns = [col.strip() for col in tx.columns]
+
+                # Case-insensitive mapping
+                col_map = {col.lower(): col for col in inv.columns}
+                tx_map = {col.lower(): col for col in tx.columns}
+
+                # Required: Location, Item
+                if 'location' not in col_map or 'item' not in col_map:
+                    st.error("Inventory CSV must have columns named **Location** and **Item** (any case, extra spaces OK)")
                     st.stop()
 
-                # Rename to lowercase
+                # Rename to internal
                 inv = inv.rename(columns={
-                    "Location": "location",
-                    "Item": "item",
-                    "quantity": "quantity",
-                    "notes": "notes"
+                    col_map['location']: 'location',
+                    col_map['item']: 'item',
+                    col_map.get('quantity', col_map.get('qty', '')): 'quantity',
+                    col_map.get('notes', ''): 'notes'
                 })
 
                 # Normalize location
                 inv['location'] = inv['location'].astype(str).str.strip().str.upper()
                 inv['location'] = inv['location'].str.replace(r'[^0-9A-Z]', '', regex=True)
 
-                # Validate format: 105A
+                # Validate format
                 valid = inv['location'].str.match(r'^\d{3}[A-Z]$')
                 invalid = inv[~valid]
                 if len(invalid) > 0:
-                    st.warning(f"Skipped {len(invalid)} invalid locations (need 105A format):")
+                    st.warning(f"Skipped {len(invalid)} invalid locations:")
                     st.write(invalid[['location']].head())
                 inv = inv[valid].copy()
 
-                # Fill missing columns
+                # Fill missing
                 inv['quantity'] = pd.to_numeric(inv.get('quantity', 0), errors='coerce').fillna(0).astype(int)
                 inv['notes'] = inv.get('notes', '').fillna("").astype(str)
 
                 # --- TRANSACTIONS ---
-                req_tx = ["item", "action", "user", "timestamp", "qty"]
-                if not all(col in tx.columns for col in req_tx):
-                    st.error(f"Transactions CSV must have: {', '.join(req_tx)}")
+                req_tx = ['item', 'action', 'user', 'timestamp', 'qty']
+                missing_tx = [c for c in req_tx if c not in tx_map]
+                if missing_tx:
+                    st.error(f"Transactions CSV missing: {', '.join(missing_tx)}")
                     st.stop()
 
+                tx = tx.rename(columns={tx_map[c]: c for c in req_tx})
                 tx['qty'] = pd.to_numeric(tx['qty'], errors='coerce').fillna(0).astype(int)
 
-                # --- CLEAR & INSERT ---
+                # --- INSERT ---
                 cur.execute("DELETE FROM inventory")
                 cur.execute("DELETE FROM transactions")
 
@@ -146,7 +160,7 @@ if inv_csv and tx_csv:
 
                 for _, r in tx.iterrows():
                     cur.execute(
-                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?,?,?,?,?)",
+                        "INSERT INTO transactions VALUES (?,?,?,?,?)",
                         (r['item'], r['action'], r['user'], r['timestamp'], r['qty'])
                     )
 
@@ -192,7 +206,7 @@ with tab_inv:
     if not cabinets:
         st.warning("No cabinets found. Check `Location` format (e.g., `105A`).")
     if not drawers:
-        st.info("No drawers found. Need letter after number (e.g., `105A`).")
+        st.info("No drawers found. Need letter after number.")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: name = st.text_input("Item Name", key="s_name")
