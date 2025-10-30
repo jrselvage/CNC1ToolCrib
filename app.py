@@ -75,48 +75,41 @@ with st.sidebar.form("add_form", clear_on_submit=True):
         st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – restore from Excel (NO openpyxl!)
+#  SIDEBAR – restore from CSV (no openpyxl!)
 # -------------------------------------------------
 st.sidebar.markdown("---")
-st.sidebar.subheader("Restore from Excel")
-restore_file = st.sidebar.file_uploader(
-    "Upload .xlsx (Inventory + Transactions)", type=["xlsx", "xls"], key="restore"
-)
+st.sidebar.subheader("Restore from CSV")
+st.sidebar.caption("Save **Inventory** and **Transactions** as separate CSV files and upload them.")
+inv_csv = st.sidebar.file_uploader("Inventory CSV", type=["csv"], key="inv_csv")
+tx_csv  = st.sidebar.file_uploader("Transactions CSV", type=["csv"], key="tx_csv")
 
-if restore_file:
+if inv_csv and tx_csv:
     try:
-        # Force xlrd engine – it works for .xlsx if the file is simple
-        # (pandas falls back automatically if xlrd can't read .xlsx)
-        sheets = pd.read_excel(restore_file, sheet_name=None, engine="xlrd")
-    except Exception:
-        # Fallback: let pandas try its default engine
-        try:
-            sheets = pd.read_excel(restore_file, sheet_name=None)
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-            st.stop()
+        inv = pd.read_csv(inv_csv).fillna("")
+        tx  = pd.read_csv(tx_csv).fillna("")
 
-    inv = sheets.get("Inventory", pd.DataFrame())
-    tx  = sheets.get("Transactions", pd.DataFrame())
+        # Expected columns
+        inv_cols = ["location","item","notes","quantity"]
+        tx_cols  = ["item","action","user","timestamp","qty"]
 
-    inv_cols = ["location","item","notes","quantity"]
-    tx_cols  = ["item","action","user","timestamp","qty"]
+        # Keep only known columns
+        inv = inv[[c for c in inv_cols if c in inv.columns]]
+        tx  = tx[[c for c in tx_cols if c in tx.columns]]
 
-    inv = inv[inv_cols].fillna("") if not inv.empty else pd.DataFrame(columns=inv_cols)
-    tx  = tx[tx_cols].fillna("")   if not tx.empty  else pd.DataFrame(columns=tx_cols)
+        cur.execute("DELETE FROM inventory")
+        cur.execute("DELETE FROM transactions")
 
-    cur.execute("DELETE FROM inventory")
-    cur.execute("DELETE FROM transactions")
-
-    for _, r in inv.iterrows():
-        cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
-                    (r['location'], r['item'], r['notes'], int(r['quantity'] or 0)))
-    for _, r in tx.iterrows():
-        cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
-                    (r['item'], r['action'], r['user'], r['timestamp'], int(r['qty'] or 0)))
-    conn.commit()
-    st.success("Restore complete!")
-    st.rerun()
+        for _, r in inv.iterrows():
+            cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
+                        (r.get('location',''), r.get('item',''), r.get('notes',''), int(r.get('quantity',0))))
+        for _, r in tx.iterrows():
+            cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
+                        (r.get('item',''), r.get('action',''), r.get('user',''), r.get('timestamp',''), int(r.get('qty',0))))
+        conn.commit()
+        st.success("Restore complete!")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Restore failed: {e}")
 
 # -------------------------------------------------
 #  SIDEBAR – DB backup
@@ -211,7 +204,7 @@ with tab_inv:
                             st.rerun()
 
 # -------------------------------------------------
-#  TRANSACTIONS TAB + EXPORT
+#  TRANSACTIONS TAB + CSV EXPORT
 # -------------------------------------------------
 with tab_tx:
     st.subheader("Transaction History")
@@ -245,25 +238,17 @@ with tab_tx:
         st.dataframe(df_tx[['timestamp','action','qty','item','user']],
                      use_container_width=True, hide_index=True)
 
-        # ----- EXPORT (xlsxwriter → CSV fallback) -----
-        def export_df(df, name):
-            try:
-                out = io.BytesIO()
-                with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-                    df.to_excel(writer, sheet_name=name, index=False)
-                out.seek(0)
-                return out.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{name}_{datetime.now():%Y%m%d}.xlsx"
-            except Exception:
-                out = io.StringIO()
-                df.to_csv(out, index=False)
-                out.seek(0)
-                return out.getvalue().encode(), "text/csv", f"{name}_{datetime.now():%Y%m%d}.csv"
-
-        data, mime, fname = export_df(df_tx, "transactions")
-        st.download_button("Download Transactions", data, file_name=fname, mime=mime)
+        # CSV export (always works)
+        csv = df_tx.to_csv(index=False).encode()
+        st.download_button(
+            "Download Transactions (CSV)",
+            csv,
+            file_name=f"transactions_{datetime.now():%Y%m%d}.csv",
+            mime="text/csv"
+        )
 
 # -------------------------------------------------
-#  REPORTS TAB + EXPORT
+#  REPORTS TAB + CSV EXPORT
 # -------------------------------------------------
 with tab_rep:
     st.subheader("Generate Report")
@@ -305,5 +290,10 @@ with tab_rep:
             st.write("### Preview")
             st.dataframe(df_r, use_container_width=True)
 
-            data, mime, fname = export_df(df_r, "report")
-            st.download_button("Download Report", data, file_name=fname, mime=mime)
+            csv = df_r.to_csv(index=False).encode()
+            st.download_button(
+                "Download Report (CSV)",
+                csv,
+                file_name=f"report_{datetime.now():%Y%m%d}.csv",
+                mime="text/csv"
+            )
