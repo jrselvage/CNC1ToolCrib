@@ -69,6 +69,16 @@ def upload_db():
     except Exception as e:
         st.toast(f"Upload error: {e}")
 
+        # --- ADMIN: Restore from Backup ---
+st.sidebar.header("Admin: Restore DB")
+uploaded = st.sidebar.file_uploader("Upload inventory.db backup", type=['db'])
+if uploaded:
+    with open(DB_PATH, "wb") as f:
+        f.write(uploaded.getvalue())
+    st.success("DB restored! Restarting...")
+    upload_db()  # Push to GitHub
+    st.rerun()
+
 # ------------------- DATABASE -------------------
 @st.cache_resource
 def get_connection():
