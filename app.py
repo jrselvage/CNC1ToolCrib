@@ -4,30 +4,10 @@ import pandas as pd
 import fitz
 from datetime import datetime, timedelta
 import io
-import re
 import os
-import requests  # Only kept for download_db() — can remove if not needed
 
 # ------------------- CONFIG -------------------
-DB_URL = "https://raw.githubusercontent.com/jrselvage/CNC1ToolCrib/main/inventory.db"
 DB_PATH = "inventory.db"
-
-# ------------------- DOWNLOAD DB FROM GITHUB (Optional) -------------------
-def download_db():
-    if os.path.exists(DB_PATH):
-        return
-    try:
-        r = requests.get(DB_URL, timeout=10)
-        if r.status_code == 200 and len(r.content) > 100:  # Valid DB
-            with open(DB_PATH, "wb") as f:
-                f.write(r.content)
-            st.toast("Database loaded from GitHub")
-        else:
-            st.toast("No DB on GitHub. Starting fresh.")
-    except Exception as e:
-        st.toast(f"Download failed: {e}. Starting fresh.")
-
-download_db()
 
 # ------------------- DATABASE -------------------
 @st.cache_resource
@@ -68,9 +48,8 @@ if not cursor.fetchone():
     ]:
         cursor.execute(idx)
     conn.commit()
-    # No upload_db() here
 
-# ------------------- PAGE CONFIG -------------------
+# ------------------- PAGE -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
 
@@ -78,24 +57,27 @@ st.title("CNC1 Tool Crib Inventory System")
 col1, col2 = st.columns(2)
 with col1:
     if st.button("CHECK DATABASE"):
-        size = os.path.getsize(DB_PATH)
-        items = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0,0]
-        txs = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0,0]
-        st.success(f"DB: {size:,} bytes | {items} items | {txs} txs")
+        try:
+            size = os.path.getsize(DB_PATH)
+            items = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0,0]
+            txs = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0,0]
+            st.success(f"DB: {size:,} bytes | {items} items | {txs} txs")
+        except Exception:
+            st.error("DB not ready")
 
 with col2:
     try:
         with open(DB_PATH, "rb") as f:
             db_bytes = f.read()
         st.download_button(
-            label="DOWNLOAD DB",
+            label="DOWNLOAD DB BACKUP",
             data=db_bytes,
             file_name=f"inventory_backup_{datetime.now():%Y%m%d_%H%M%S}.db",
             mime="application/octet-stream"
         )
         st.caption(f"Size: {len(db_bytes):,} bytes")
-    except Exception as e:
-        st.error(f"Failed to read DB: {e}")
+    except Exception:
+        st.error("DB not found")
 
 # ------------------- ADD ITEM -------------------
 st.sidebar.header("Add New Item")
@@ -112,7 +94,6 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             (new_loc, new_item.strip(), new_notes.strip(), int(new_qty))
         )
         conn.commit()
-        # No upload_db()
         st.cache_data.clear()
         st.success(f"Added: {new_item}")
         st.rerun()
@@ -158,7 +139,6 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
-                            # No upload_db()
                             st.cache_data.clear()
                             st.success("Saved")
                             st.rerun()
@@ -175,7 +155,6 @@ with tab_inventory:
                             new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                             cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                             conn.commit()
-                            # No upload_db()
                             st.cache_data.clear()
                             st.success(f"{action}: {qty}")
                             st.rerun()
@@ -186,7 +165,6 @@ with tab_inventory:
                                            (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                             cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                             conn.commit()
-                            # No upload_db()
                             st.cache_data.clear()
                             st.warning("Deleted")
                             st.rerun()
@@ -200,9 +178,8 @@ with tab_transactions:
     with c3: t_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="t_action")
     with c4: t_qty = st.number_input("Qty", min_value=0, value=0, key="t_qty")
 
-    today = datetime.today().date()
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
-    end_date = st.date_input("To", value=today, key="t_end")
+    end_date = st.date_input("To", value=datetime.today().date(), key="t_end")
 
     start_str = start_date.strftime("%Y-%m-%d 00:00:00")
     end_str = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -255,7 +232,6 @@ with tab_reports:
             if cust: q += " AND location LIKE ?"; p.append(f"%{cust}%")
             if zero_only: q += " AND quantity = 0"
             df = pd.read_sql_query(q, conn, params=p)
-
             last_tx = pd.read_sql_query("""
                 SELECT item, MAX(timestamp) as last_tx
                 FROM transactions WHERE timestamp BETWEEN ? AND ?
