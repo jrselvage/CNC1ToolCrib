@@ -15,14 +15,14 @@ def backup_db():
     except:
         pass
 
-# ------------------- SAFE DB CONNECTION -------------------
+# ------------------- DATABASE SETUP (LOAD COMMITTED DB) -------------------
 DB_PATH = "inventory.db"
 
 @st.cache_resource
 def get_connection():
-    # Check if file exists first
     if not os.path.exists(DB_PATH):
-        st.warning("inventory.db not found. Creating new database.")
+        st.error("inventory.db missing! Commit it to Git.")
+        st.stop()
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA cache_size=10000;")
@@ -31,7 +31,7 @@ def get_connection():
 conn = get_connection()
 cursor = conn.cursor()
 
-# ------------------- CREATE TABLES ONLY IF MISSING -------------------
+# Create tables only if they don't exist
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory'")
 if not cursor.fetchone():
     cursor.execute("""
@@ -51,7 +51,6 @@ if not cursor.fetchone():
         qty INTEGER
     )
     """)
-    # Indexes
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
         "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
@@ -60,29 +59,30 @@ if not cursor.fetchone():
     ]:
         cursor.execute(idx)
     conn.commit()
-    st.success("Database initialized!")
 
 # ------------------- Page Config -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory Management System")
 
-# ------------------- DEBUG: CHECK DATABASE STATUS -------------------
+# ------------------- DEBUG: CHECK DB -------------------
 if st.button("CHECK DATABASE STATUS"):
-    if os.path.exists(DB_PATH):
-        size = os.path.getsize(DB_PATH)
-        item_count = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0, 0]
-        tx_count = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0, 0]
-        st.success(f"DB LOADED! Size: {size:,} bytes | Items: {item_count} | Transactions: {tx_count}")
-    else:
-        st.error("inventory.db NOT FOUND")
+    size = os.path.getsize(DB_PATH)
+    items = pd.read_sql_query("SELECT COUNT(*) FROM inventory", conn).iloc[0,0]
+    txs = pd.read_sql_query("SELECT COUNT(*) FROM transactions", conn).iloc[0,0]
+    st.success(f"DB LOADED | Size: {size:,} bytes | Items: {items} | Transactions: {txs}")
 
-# ------------------- Sidebar: Add Item -------------------
+# ------------------- Sidebar: Add Item (CLEARS ON SUBMIT) -------------------
 st.sidebar.header("Add New Inventory Item")
-with st.sidebar.form("add_item_form"):
-    new_item = st.text_input("Item Name", key="add_name")
-    new_location = st.text_input("Location (e.g., 105A)", key="add_loc").strip().upper()
+
+# Use session_state to clear form
+if 'add_form_submitted' not in st.session_state:
+    st.session_state.add_form_submitted = False
+
+with st.sidebar.form("add_item_form", clear_on_submit=True):
+    new_item = st.text_input("Item Name", value="", key="add_name")
+    new_location = st.text_input("Location (e.g., 105A)", value="", key="add_loc").strip().upper()
     new_quantity = st.number_input("Quantity", min_value=0, step=1, value=0, key="add_qty")
-    new_notes = st.text_area("Notes", key="add_notes")
+    new_notes = st.text_area("Notes", value="", key="add_notes")
     submitted = st.form_submit_button("Add Item")
 
     if submitted and new_item and new_location:
@@ -92,14 +92,23 @@ with st.sidebar.form("add_item_form"):
         )
         conn.commit()
         backup_db()
-        st.cache_data.clear()  # Clear caches for refresh
-        st.sidebar.success(f"Added: {new_item}")
+        st.cache_data.clear()  # Force refresh
+        st.session_state.add_form_submitted = True
+        st.success(f"Added: {new_item}")
         st.rerun()
+
+# Clear form after rerun
+if st.session_state.add_form_submitted:
+    st.session_state.add_form_submitted = False
+    # Reset widget values
+    for key in ["add_name", "add_loc", "add_qty", "add_notes"]:
+        if key in st.session_state:
+            del st.session_state[key]
 
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Cabinets & Drawers (Numeric Sort) -------------------
+# ------------------- Cabinets & Drawers -------------------
 @st.cache_data(ttl=300)
 def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
@@ -122,8 +131,7 @@ def get_cabinets_and_drawers():
         else:
             drawers.add(loc)
 
-    cabinets_str = [str(c) for c in sorted(cabinet_nums)]
-    return cabinets_str, sorted(drawers)
+    return [str(c) for c in sorted(cabinet_nums)], sorted(drawers)
 
 cabinets, drawers = get_cabinets_and_drawers()
 
@@ -145,14 +153,14 @@ with tab_inventory:
         st.info("Select a filter to search.")
     else:
         @st.cache_data(ttl=60)
-        def load_inventory(name="", cab="All", drw="All", qty=0):
+        def load_inventory(_name="", _cab="All", _drw="All", _qty=0):
             q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
             p = []
-            if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
-            if cab != "All" and drw != "All": q += " AND location LIKE ?"; p.append(f"{cab}{drw}")
-            elif cab != "All": q += " AND location LIKE ?"; p.append(f"{cab}%")
-            elif drw != "All": q += " AND location LIKE ?"; p.append(f"%{drw}")
-            if qty > 0: q += " AND quantity = ?"; p.append(qty)
+            if _name: q += " AND item LIKE ?"; p.append(f"%{_name}%")
+            if _cab != "All" and _drw != "All": q += " AND location LIKE ?"; p.append(f"{_cab}{_drw}")
+            elif _cab != "All": q += " AND location LIKE ?"; p.append(f"{_cab}%")
+            elif _drw != "All": q += " AND location LIKE ?"; p.append(f"%{_drw}")
+            if _qty > 0: q += " AND quantity = ?"; p.append(_qty)
             q += " ORDER BY location, item"
             return pd.read_sql_query(q, conn, params=p)
 
@@ -170,7 +178,7 @@ with tab_inventory:
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
                             backup_db()
-                            st.cache_data.clear()  # Clear for refresh
+                            st.cache_data.clear()
                             st.success("Saved")
                             st.rerun()
                     action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
@@ -191,7 +199,7 @@ with tab_inventory:
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
                         backup_db()
-                        st.cache_data.clear()  # Clear for transactions to show
+                        st.cache_data.clear()  # CRITICAL: Show transaction immediately
                         st.success(f"{action}: {qty}")
                         st.rerun()
 
@@ -202,11 +210,11 @@ with tab_inventory:
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
                         backup_db()
-                        st.cache_data.clear()  # Clear for refresh
+                        st.cache_data.clear()
                         st.warning("Deleted")
                         st.rerun()
 
-# ------------------- TRANSACTIONS TAB (FIXED DATE RANGE + REFRESH) -------------------
+# ------------------- TRANSACTIONS TAB (INSTANT REFRESH) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
     c1, c2, c3, c4 = st.columns(4)
@@ -219,22 +227,21 @@ with tab_transactions:
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
     end_date = st.date_input("To", value=today, key="t_end")
 
-    # FIXED: Consistent date strings for cache
     start_str = start_date.strftime("%Y-%m-%d 00:00:00")
     end_str = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     @st.cache_data(ttl=60)
-    def load_transactions(item="", user="", action="All", qty=0, start_time=start_str, end_time=end_str):
+    def load_transactions(_item="", _user="", _action="All", _qty=0, _start="", _end=""):
         q = "SELECT * FROM transactions WHERE timestamp BETWEEN ? AND ?"
-        p = [start_time, end_time]  # FIXED: Use correct params
-        if item: q += " AND item LIKE ?"; p.append(f"%{item}%")
-        if user: q += " AND user LIKE ?"; p.append(f"%{user}%")
-        if action != "All": q += " AND action = ?"; p.append(action)
-        if qty > 0: q += " AND qty = ?"; p.append(qty)
+        p = [_start, _end]
+        if _item: q += " AND item LIKE ?"; p.append(f"%{_item}%")
+        if _user: q += " AND user LIKE ?"; p.append(f"%{_user}%")
+        if _action != "All": q += " AND action = ?"; p.append(_action)
+        if _qty > 0: q += " AND qty = ?"; p.append(_qty)
         q += " ORDER BY timestamp DESC LIMIT 1000"
         return pd.read_sql_query(q, conn, params=p)
 
-    df_tx = load_transactions(t_item, t_user, t_action, t_qty, start_str, end_str)  # FIXED: Pass correct params
+    df_tx = load_transactions(t_item, t_user, t_action, t_qty, start_str, end_str)
     if df_tx.empty:
         st.info("No transactions found.")
     else:
