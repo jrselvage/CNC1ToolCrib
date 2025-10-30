@@ -8,27 +8,32 @@ import re
 import shutil
 import os
 
-# ------------------- AUTO BACKUP -------------------
-def backup_db():
+# ------------------- AUTO BACKUP FUNCTION -------------------
+def auto_backup():
+    """Save inventory.db → inventory_backup.db after every change"""
     try:
         shutil.copy("inventory.db", "inventory_backup.db")
-    except:
-        pass
+        # Optional: Show tiny toast
+        st.toast("Auto-backup saved", icon="Success")
+    except Exception as e:
+        st.toast(f"Backup failed: {e}", icon="Error")
 
-# ------------------- DATABASE: LOAD OR RESTORE FROM UPLOAD -------------------
+# ------------------- DATABASE: LOAD OR RESTORE -------------------
 DB_PATH = "inventory.db"
 
 def init_db():
     if os.path.exists(DB_PATH):
         return sqlite3.connect(DB_PATH, check_same_thread=False)
     
-    st.warning("inventory.db not found. Please upload your database file.")
-    uploaded = st.file_uploader("Upload inventory.db", type="db")
+    st.error("inventory.db not found!")
+    st.info("Upload your database to restore.")
+    uploaded = st.file_uploader("Upload inventory.db", type="db", key="restore_db")
     if uploaded:
         with open(DB_PATH, "wb") as f:
             f.write(uploaded.getbuffer())
+        auto_backup()
         st.success("Database restored! Restarting...")
-        st.experimental_rerun()
+        st.rerun()
     st.stop()
 
 @st.cache_resource
@@ -54,12 +59,13 @@ if not cursor.fetchone():
     ]:
         cursor.execute(idx)
     conn.commit()
+    auto_backup()
 
 # ------------------- Page Config -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory Management System")
 
-# ------------------- DEBUG + DOWNLOAD CURRENT DB -------------------
+# ------------------- DEBUG + AUTO DOWNLOAD -------------------
 col1, col2 = st.columns(2)
 with col1:
     if st.button("CHECK DB STATUS"):
@@ -69,9 +75,15 @@ with col1:
         st.success(f"DB LOADED | {size:,} bytes | {items} items | {txs} txs")
 with col2:
     with open(DB_PATH, "rb") as f:
-        st.download_button("DOWNLOAD CURRENT DB", f, "inventory.db", "application/octet-stream")
+        st.download_button(
+            "DOWNLOAD CURRENT DB",
+            f,
+            "inventory.db",
+            "application/octet-stream",
+            help="Download your full database"
+        )
 
-# ------------------- Sidebar: Add Item (CLEARS ON SUBMIT) -------------------
+# ------------------- Sidebar: Add Item -------------------
 st.sidebar.header("Add New Inventory Item")
 with st.sidebar.form("add_item_form", clear_on_submit=True):
     new_item = st.text_input("Item Name", key="add_name")
@@ -81,10 +93,12 @@ with st.sidebar.form("add_item_form", clear_on_submit=True):
     submitted = st.form_submit_button("Add Item")
 
     if submitted and new_item and new_location:
-        cursor.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
-                       (new_location, new_item.strip(), new_notes.strip(), int(new_quantity)))
+        cursor.execute(
+            "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
+            (new_location, new_item.strip(), new_notes.strip(), int(new_quantity))
+        )
         conn.commit()
-        backup_db()
+        auto_backup()  # BACKUP AFTER ADD
         st.cache_data.clear()
         st.success(f"Added: {new_item}")
         st.rerun()
@@ -151,7 +165,7 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
-                            backup_db()
+                            auto_backup()  # BACKUP AFTER NOTES
                             st.cache_data.clear()
                             st.success("Saved")
                             st.rerun()
@@ -172,7 +186,7 @@ with tab_inventory:
                         new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
-                        backup_db()
+                        auto_backup()  # BACKUP AFTER CHECK OUT/IN
                         st.cache_data.clear()
                         st.success(f"{action}: {qty}")
                         st.rerun()
@@ -183,7 +197,7 @@ with tab_inventory:
                                        (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
-                        backup_db()
+                        auto_backup()  # BACKUP AFTER DELETE
                         st.cache_data.clear()
                         st.warning("Deleted")
                         st.rerun()
@@ -222,4 +236,4 @@ with tab_transactions:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
 
 # ------------------- REPORTS TAB (unchanged) -------------------
-# ... [same as before]
+# [Same as before — omitted for brevity]
