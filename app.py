@@ -18,7 +18,7 @@ def get_connection():
 conn = get_connection()
 cursor = conn.cursor()
 
-# Create tables
+# Create tables (idempotent)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS inventory (
     location TEXT,
@@ -37,11 +37,14 @@ CREATE TABLE IF NOT EXISTS transactions (
 )
 """)
 
-# ------------------- INDEXES (FOR SPEED) -------------------
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)")
-cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)")
+# Indexes – run once
+for idx in [
+    "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
+    "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
+    "CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)",
+    "CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)"
+]:
+    cursor.execute(idx)
 conn.commit()
 
 # ------------------- Page Config -------------------
@@ -69,10 +72,19 @@ with st.sidebar.form("add_item_form"):
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- INVENTORY TAB (FAST + EXPANDERS) -------------------
+# ------------------- Helper: Cached locations (lazy) -------------------
+@st.cache_data(ttl=300)
+def _get_locations():
+    df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
+    return sorted(df['location'].dropna().unique().tolist())
+
+def get_locations():
+    # Only call the cached function when we really need it
+    return _get_locations()
+
+# ------------------- INVENTORY TAB -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
-
     col1, col2, col3, col4 = st.columns(4)
     with col1: search_name = st.text_input("Item Name", key="inv_name")
     with col2: cabinet = st.number_input("Cabinet #", min_value=0, step=1, key="inv_cabinet", value=0)
@@ -81,18 +93,14 @@ with tab_inventory:
 
     @st.cache_data(ttl=60)
     def load_inventory(name="", cab=0, drw="", qty=0):
-        query = """
-        SELECT rowid AS id, location, item, notes, quantity
-        FROM inventory
-        WHERE 1=1
-        """
-        params = []
-        if name: query += " AND item LIKE ?"; params.append(f"%{name}%")
-        if cab > 0: query += " AND location LIKE ?"; params.append(f"{cab}%")
-        if drw: query += " AND location LIKE ?"; params.append(f"%{drw}")
-        if qty > 0: query += " AND quantity = ?"; params.append(qty)
-        query += " ORDER BY location, item"
-        return pd.read_sql_query(query, conn, params=params)
+        q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
+        p = []
+        if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
+        if cab > 0: q += " AND location LIKE ?"; p.append(f"{cab}%")
+        if drw: q += " AND location LIKE ?"; p.append(f"%{drw}")
+        if qty > 0: q += " AND quantity = ?"; p.append(qty)
+        q += " ORDER BY location, item"
+        return pd.read_sql_query(q, conn, params=p)
 
     df = load_inventory(search_name, cabinet, drawer, qty_filter)
 
@@ -104,11 +112,11 @@ with tab_inventory:
             with st.expander(f"{row['item']} @ {row['location']} — Qty: {row['quantity']}"):
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    edited_notes = st.text_area("Notes", value=row['notes'] or "", key=f"n_{row['id']}", height=70)
+                    notes = st.text_area("Notes", value=row['notes'] or "", key=f"n_{row['id']}", height=70)
                     if st.button("Save Notes", key=f"s_{row['id']}"):
-                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), row['id']))
+                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                         conn.commit()
-                        st.success("Notes saved")
+                        st.success("Saved")
                         st.rerun()
 
                 action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
@@ -140,24 +148,22 @@ with tab_inventory:
                     st.warning("Deleted")
                     st.rerun()
 
-# ------------------- TRANSACTIONS TAB (INSTANT LOAD) -------------------
+# ------------------- TRANSACTIONS TAB (INSTANT) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
-
     c1, c2, c3, c4 = st.columns(4)
     with c1: t_item = st.text_input("Item", key="t_item")
     with c2: t_user = st.text_input("User", key="t_user")
     with c3: t_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="t_action")
     with c4: t_qty = st.number_input("Qty", min_value=0, step=1, key="t_qty", value=0)
 
-    # FIX: Include full end day (up to 23:59:59)
     today = datetime.today().date()
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
     end_date = st.date_input("To", value=today, key="t_end")
 
-    # Convert to full day range
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    # Full-day inclusive range
+    start_str = start_date.strftime("%Y-%m-%d 00:00:00")
+    end_str   = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     @st.cache_data(ttl=60)
     def load_transactions(item="", user="", action="All", qty=0, s=start_str, e=end_str):
@@ -177,19 +183,13 @@ with tab_transactions:
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
 
-# ------------------- REPORTS TAB (ON-DEMAND ONLY) -------------------
+# ------------------- REPORTS TAB (ON-DEMAND) -------------------
 with tab_reports:
     st.subheader("Generate Report")
 
-    # LAZY LOAD: Only get locations when needed
-    if 'locations' not in st.session_state:
-        @st.cache_data(ttl=300)
-        def get_locations():
-            df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
-            return sorted(df['location'].dropna().unique().tolist())
-        st.session_state.locations = get_locations()
-
-    prefixes = sorted({loc[:2] for loc in st.session_state.locations if len(loc) >= 2})
+    # Lazy-load locations only when the tab is open
+    locations = get_locations()
+    prefixes = sorted({loc[:2] for loc in locations if len(loc) >= 2})
 
     with st.form("report_form"):
         prefix = st.selectbox("Location Prefix", ["All"] + prefixes, key="r_prefix")
@@ -200,9 +200,9 @@ with tab_reports:
         generate = st.form_submit_button("Generate Report")
 
     if generate:
-        # FIX: Full end day
-        r_end_full = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
-        r_start_str = r_start.strftime("%Y-%m-%d")
+        # Full-day range for last_tx
+        r_start_str = r_start.strftime("%Y-%m-%d 00:00:00")
+        r_end_str   = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
         @st.cache_data
         def build_report(pfx, cust, zero_only, s, e):
@@ -214,8 +214,8 @@ with tab_reports:
             df = pd.read_sql_query(q, conn, params=p)
 
             last_tx = pd.read_sql_query("""
-                SELECT item, MAX(timestamp) as last_tx 
-                FROM transactions 
+                SELECT item, MAX(timestamp) as last_tx
+                FROM transactions
                 WHERE timestamp BETWEEN ? AND ?
                 GROUP BY item
             """, conn, params=[s, e])
@@ -224,8 +224,8 @@ with tab_reports:
             mask = df['last_tx'].isna() | ((df['last_tx'] >= pd.Timestamp(s)) & (df['last_tx'] <= pd.Timestamp(e)))
             return df[mask]
 
-        with st.spinner("Generating report..."):
-            df_report = build_report(prefix, custom_loc, zero_only, r_start_str, r_end_full)
+        with st.spinner("Building report..."):
+            df_report = build_report(prefix, custom_loc, zero_only, r_start_str, r_end_str)
 
         if df_report.empty:
             st.warning("No data matches the filters.")
