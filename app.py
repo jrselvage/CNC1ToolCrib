@@ -68,48 +68,71 @@ with st.sidebar.form("add_form", clear_on_submit=True):
     add = st.form_submit_button("Add Item")
 
     if add and new_item and new_loc:
-        cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
+        cur.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
                     (new_loc, new_item.strip(), new_notes.strip(), int(new_qty)))
         conn.commit()
         st.success(f"Added {new_item}")
         st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – restore from CSV (no openpyxl!)
+#  SIDEBAR – RESTORE FROM CSV (FIXED COLUMN COUNT)
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Restore from CSV")
-st.sidebar.caption("Save **Inventory** and **Transactions** as separate CSV files and upload them.")
+st.sidebar.caption("Save **Inventory** and **Transactions** as **CSV UTF-8** from Excel. Extra columns are ignored.")
+
 inv_csv = st.sidebar.file_uploader("Inventory CSV", type=["csv"], key="inv_csv")
 tx_csv  = st.sidebar.file_uploader("Transactions CSV", type=["csv"], key="tx_csv")
 
 if inv_csv and tx_csv:
-    try:
-        inv = pd.read_csv(inv_csv).fillna("")
-        tx  = pd.read_csv(tx_csv).fillna("")
+    if st.sidebar.button("Restore Database from CSV", type="primary"):
+        with st.spinner("Restoring..."):
+            try:
+                # Read CSVs
+                inv = pd.read_csv(inv_csv).fillna("")
+                tx  = pd.read_csv(tx_csv).fillna("")
 
-        # Expected columns
-        inv_cols = ["location","item","notes","quantity"]
-        tx_cols  = ["item","action","user","timestamp","qty"]
+                # Expected columns
+                inv_cols = ["location", "item", "notes", "quantity"]
+                tx_cols  = ["item", "action", "user", "timestamp", "qty"]
 
-        # Keep only known columns
-        inv = inv[[c for c in inv_cols if c in inv.columns]]
-        tx  = tx[[c for c in tx_cols if c in tx.columns]]
+                # Keep only known columns (ignore extras like 'id')
+                inv = inv[[c for c in inv_cols if c in inv.columns]]
+                tx  = tx[[c for c in tx_cols if c in tx.columns]]
 
-        cur.execute("DELETE FROM inventory")
-        cur.execute("DELETE FROM transactions")
+                # Validate minimum required
+                if len(inv.columns) < 4:
+                    st.error("Inventory CSV must have: location, item, notes, quantity")
+                    st.stop()
+                if len(tx.columns) < 5:
+                    st.error("Transactions CSV must have: item, action, user, timestamp, qty")
+                    st.stop()
 
-        for _, r in inv.iterrows():
-            cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
-                        (r.get('location',''), r.get('item',''), r.get('notes',''), int(r.get('quantity',0))))
-        for _, r in tx.iterrows():
-            cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
-                        (r.get('item',''), r.get('action',''), r.get('user',''), r.get('timestamp',''), int(r.get('qty',0))))
-        conn.commit()
-        st.success("Restore complete!")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Restore failed: {e}")
+                # Clear DB
+                cur.execute("DELETE FROM inventory")
+                cur.execute("DELETE FROM transactions")
+
+                # Insert inventory – explicit columns
+                for _, r in inv.iterrows():
+                    cur.execute(
+                        "INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
+                        (r['location'], r['item'], r['notes'], int(r['quantity']))
+                    )
+
+                # Insert transactions – explicit columns
+                for _, r in tx.iterrows():
+                    cur.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?,?,?,?,?)",
+                        (r['item'], r['action'], r['user'], r['timestamp'], int(r['qty']))
+                    )
+
+                conn.commit()
+                st.success("Database restored from CSV!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Restore failed: {e}")
+else:
+    st.sidebar.info("Upload both CSV files to enable restore.")
 
 # -------------------------------------------------
 #  SIDEBAR – DB backup
@@ -186,7 +209,7 @@ with tab_inv:
                     with bc1:
                         if st.button("Submit",key=f"sub_{r['id']}") and act!="None" and usr.strip():
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
+                            cur.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?,?,?,?,?)",
                                         (r['item'],act,usr.strip(),ts,q))
                             new_q = r['quantity']-q if act=="Check Out" else r['quantity']+q
                             cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?",(max(0,new_q),r['id']))
@@ -196,7 +219,7 @@ with tab_inv:
                     with bc2:
                         if st.button("Delete",key=f"del_{r['id']}") and usr.strip():
                             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
+                            cur.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?,?,?,?,?)",
                                         (r['item'],"Deleted",usr.strip(),ts,r['quantity']))
                             cur.execute("DELETE FROM inventory WHERE rowid=?",(r['id'],))
                             conn.commit()
@@ -238,7 +261,6 @@ with tab_tx:
         st.dataframe(df_tx[['timestamp','action','qty','item','user']],
                      use_container_width=True, hide_index=True)
 
-        # CSV export (always works)
         csv = df_tx.to_csv(index=False).encode()
         st.download_button(
             "Download Transactions (CSV)",
