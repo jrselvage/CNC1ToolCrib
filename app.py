@@ -75,38 +75,48 @@ with st.sidebar.form("add_form", clear_on_submit=True):
         st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – restore from Excel
+#  SIDEBAR – restore from Excel (NO openpyxl!)
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Restore from Excel")
-restore_file = st.sidebar.file_uploader("Upload .xlsx (Inventory + Transactions)", type=["xlsx"], key="restore")
+restore_file = st.sidebar.file_uploader(
+    "Upload .xlsx (Inventory + Transactions)", type=["xlsx", "xls"], key="restore"
+)
 
 if restore_file:
     try:
-        sheets = pd.read_excel(restore_file, sheet_name=None)   # reads all sheets
-        inv = sheets.get("Inventory", pd.DataFrame())
-        tx  = sheets.get("Transactions", pd.DataFrame())
+        # Force xlrd engine – it works for .xlsx if the file is simple
+        # (pandas falls back automatically if xlrd can't read .xlsx)
+        sheets = pd.read_excel(restore_file, sheet_name=None, engine="xlrd")
+    except Exception:
+        # Fallback: let pandas try its default engine
+        try:
+            sheets = pd.read_excel(restore_file, sheet_name=None)
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+            st.stop()
 
-        inv_cols = ["location","item","notes","quantity"]
-        tx_cols  = ["item","action","user","timestamp","qty"]
+    inv = sheets.get("Inventory", pd.DataFrame())
+    tx  = sheets.get("Transactions", pd.DataFrame())
 
-        inv = inv[inv_cols].fillna("") if not inv.empty else pd.DataFrame(columns=inv_cols)
-        tx  = tx[tx_cols].fillna("")   if not tx.empty  else pd.DataFrame(columns=tx_cols)
+    inv_cols = ["location","item","notes","quantity"]
+    tx_cols  = ["item","action","user","timestamp","qty"]
 
-        cur.execute("DELETE FROM inventory")
-        cur.execute("DELETE FROM transactions")
+    inv = inv[inv_cols].fillna("") if not inv.empty else pd.DataFrame(columns=inv_cols)
+    tx  = tx[tx_cols].fillna("")   if not tx.empty  else pd.DataFrame(columns=tx_cols)
 
-        for _,r in inv.iterrows():
-            cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
-                        (r['location'], r['item'], r['notes'], int(r['quantity'] or 0)))
-        for _,r in tx.iterrows():
-            cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
-                        (r['item'], r['action'], r['user'], r['timestamp'], int(r['qty'] or 0)))
-        conn.commit()
-        st.success("Restore complete!")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Restore failed: {e}")
+    cur.execute("DELETE FROM inventory")
+    cur.execute("DELETE FROM transactions")
+
+    for _, r in inv.iterrows():
+        cur.execute("INSERT INTO inventory VALUES (?,?,?,?)",
+                    (r['location'], r['item'], r['notes'], int(r['quantity'] or 0)))
+    for _, r in tx.iterrows():
+        cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
+                    (r['item'], r['action'], r['user'], r['timestamp'], int(r['qty'] or 0)))
+    conn.commit()
+    st.success("Restore complete!")
+    st.rerun()
 
 # -------------------------------------------------
 #  SIDEBAR – DB backup
@@ -235,7 +245,7 @@ with tab_tx:
         st.dataframe(df_tx[['timestamp','action','qty','item','user']],
                      use_container_width=True, hide_index=True)
 
-        # ----- EXPORT (CSV fallback) -----
+        # ----- EXPORT (xlsxwriter → CSV fallback) -----
         def export_df(df, name):
             try:
                 out = io.BytesIO()
