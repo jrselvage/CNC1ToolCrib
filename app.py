@@ -1,7 +1,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime provenance = datetime
+from datetime import datetime
 import io
 
 # -------------------------------------------------
@@ -237,7 +237,6 @@ with tab_tx:
 
         # ----- EXPORT (CSV fallback) -----
         def export_df(df, name):
-            # try Excel first
             try:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
@@ -245,7 +244,6 @@ with tab_tx:
                 out.seek(0)
                 return out.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{name}_{datetime.now():%Y%m%d}.xlsx"
             except Exception:
-                # fallback to CSV
                 out = io.StringIO()
                 df.to_csv(out, index=False)
                 out.seek(0)
