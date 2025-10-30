@@ -73,32 +73,36 @@ with st.sidebar.form("add_item_form"):
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Helper: Parse Cabinets & Drawers -------------------
+# ------------------- Helper: Parse Cabinets & Drawers (TRUE NUMERIC SORT) -------------------
 @st.cache_data(ttl=300)
 def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
     locations = [loc.strip().upper() for loc in df['location'].dropna().unique() if loc.strip()]
 
-    cabinets = set()
+    cabinet_nums = set()
     drawers = set()
 
-    # Regex: capture leading numbers as cabinet, rest as drawer
     pattern = re.compile(r'^(\d+)(.*)$', re.IGNORECASE)
 
     for loc in locations:
         match = pattern.match(loc)
         if match:
-            cabinet = match.group(1)  # e.g., "105"
-            drawer = match.group(2).strip()  # e.g., "A", "B", "TOP"
-            if cabinet:
-                cabinets.add(cabinet)
+            cabinet_num = match.group(1)  # e.g., "20"
+            drawer = match.group(2).strip()  # e.g., "A"
+            try:
+                cabinet_nums.add(int(cabinet_num))  # Convert to int → numeric sort
+            except ValueError:
+                pass
             if drawer:
                 drawers.add(drawer)
         else:
-            # Fallback: treat whole as drawer if no numbers
             drawers.add(loc)
 
-    return sorted(cabinets), sorted(drawers)
+    # Sort cabinets numerically: 1, 2, 3, ..., 20, 105
+    cabinets_sorted = sorted(cabinet_nums)  # int sort
+    cabinets_str = [str(c) for c in cabinets_sorted]  # back to str for display
+
+    return cabinets_str, sorted(drawers)
 
 cabinets, drawers = get_cabinets_and_drawers()
 
@@ -197,7 +201,7 @@ with tab_inventory:
                         st.warning("Deleted")
                         st.rerun()
 
-# ------------------- TRANSACTIONS TAB (UNCHANGED) -------------------
+# ------------------- TRANSACTIONS TAB -------------------
 with tab_transactions:
     st.subheader("Transaction History")
     c1, c2, c3, c4 = st.columns(4)
@@ -231,7 +235,7 @@ with tab_transactions:
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
 
-# ------------------- REPORTS TAB (UNCHANGED) -------------------
+# ------------------- REPORTS TAB -------------------
 with tab_reports:
     st.subheader("Generate Report")
 
