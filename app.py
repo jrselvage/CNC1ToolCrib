@@ -1,267 +1,272 @@
 import streamlit as st
+import sqlite3
 import pandas as pd
-import os
-from datetime import datetime, timedelta
+import fitz  # PyMuPDF
+from datetime import datetime
 import io
-import fitz  # PyMuPDF – for PDF reports
 
-# ------------------- CONFIG -------------------
-INVENTORY_CSV = "inventory.csv"
-TRANSACTIONS_CSV = "transactions.csv"
+# ------------------- Database Setup -------------------
+DB_PATH = "inventory.db"
 
-# ------------------- HELPER: Load / Save CSV -------------------
-def load_inventory() -> pd.DataFrame:
-    if os.path.exists(INVENTORY_CSV):
-        return pd.read_csv(INVENTORY_CSV, dtype=str).fillna("")
-    else:
-        empty = pd.DataFrame(columns=["location", "item", "notes", "quantity"])
-        empty.to_csv(INVENTORY_CSV, index=False)
-        return empty
+@st.cache_resource
+def get_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA cache_size=10000;")
+    return conn
 
-def save_inventory(df: pd.DataFrame):
-    df.to_csv(INVENTORY_CSV, index=False)
+conn = get_connection()
+cursor = conn.cursor()
 
-def load_transactions() -> pd.DataFrame:
-    if os.path.exists(TRANSACTIONS_CSV):
-        return pd.read_csv(TRANSACTIONS_CSV, dtype=str).fillna("")
-    else:
-        empty = pd.DataFrame(columns=["item", "action", "user", "timestamp", "qty"])
-        empty.to_csv(TRANSACTIONS_CSV, index=False)
-        return empty
+# Create tables
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS inventory (
+    location TEXT,
+    item TEXT,
+    notes TEXT,
+    quantity INTEGER
+)
+""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS transactions (
+    item TEXT,
+    action TEXT,
+    user TEXT,
+    timestamp TEXT,
+    qty INTEGER
+)
+""")
 
-def save_transactions(df: pd.DataFrame):
-    df.to_csv(TRANSACTIONS_CSV, index=False)
+# ------------------- ADD INDEXES FOR SPEED -------------------
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions(item)")
+cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp)")
+conn.commit()
 
-# ------------------- LOAD DATA -------------------
-inventory_df = load_inventory()
-transactions_df = load_transactions()
-
-# ------------------- PAGE -------------------
+# ------------------- Page Config -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
-st.title("CNC1 Tool Crib Inventory System")
+st.title("CNC1 Tool Crib Inventory Management System")
 
-# ------------------- DEBUG + EXCEL BACKUP / RESTORE -------------------
-col1, col2 = st.columns(2)
-
-with col1:
-    if st.button("CHECK DATA"):
-        inv = len(inventory_df)
-        tx = len(transactions_df)
-        st.success(f"Inventory: {inv:,} rows | Transactions: {tx:,} rows")
-
-with col2:
-    # ---- Build Excel in memory (xlsxwriter – no openpyxl needed) ----
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        inventory_df.to_excel(writer, sheet_name="Inventory", index=False)
-        transactions_df.to_excel(writer, sheet_name="Transactions", index=False)
-    output.seek(0)
-
-    st.download_button(
-        label="DOWNLOAD EXCEL BACKUP",
-        data=output.getvalue(),
-        file_name=f"tool_crib_backup_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-# ---- Restore from uploaded Excel ----
-uploaded = st.file_uploader("Restore from Excel backup", type=["xlsx"])
-if uploaded:
-    try:
-        # pandas can read xlsx without openpyxl if xlsxwriter is present
-        dfs = pd.read_excel(uploaded, sheet_name=None, engine="openpyxl" if "openpyxl" in pd.__dict__ else "xlsxwriter")
-        new_inv = dfs.get("Inventory", pd.DataFrame())
-        new_tx  = dfs.get("Transactions", pd.DataFrame())
-
-        inv_cols = ["location", "item", "notes", "quantity"]
-        tx_cols  = ["item", "action", "user", "timestamp", "qty"]
-        new_inv = new_inv[inv_cols].fillna("")
-        new_tx  = new_tx[tx_cols].fillna("")
-
-        new_inv.to_csv(INVENTORY_CSV, index=False)
-        new_tx.to_csv(TRANSACTIONS_CSV, index=False)
-
-        st.success("Backup restored! Refreshing data...")
-        st.experimental_rerun()
-    except Exception as e:
-        st.error(f"Restore failed: {e}")
-
-# ------------------- ADD ITEM -------------------
-st.sidebar.header("Add New Item")
-with st.sidebar.form("add_form", clear_on_submit=True):
+# ------------------- Sidebar: Add Item -------------------
+st.sidebar.header("Add New Inventory Item")
+with st.sidebar.form("add_item_form"):
     new_item = st.text_input("Item Name", key="add_name")
-    new_loc  = st.text_input("Location (e.g., 105A)", key="add_loc").strip().upper()
-    new_qty  = st.number_input("Quantity", min_value=0, step=1, value=0, key="add_qty")
-    new_notes= st.text_area("Notes", key="add_notes")
+    new_location = st.text_input("Location (e.g., 105A)", key="add_loc").strip().upper()
+    new_quantity = st.number_input("Quantity", min_value=0, step=1, value=0, key="add_qty")
+    new_notes = st.text_area("Notes", key="add_notes")
     submitted = st.form_submit_button("Add Item")
 
-    if submitted and new_item and new_loc:
-        new_row = pd.DataFrame([{
-            "location": new_loc,
-            "item": new_item.strip(),
-            "notes": new_notes.strip(),
-            "quantity": int(new_qty)
-        }])
-        inventory_df = pd.concat([inventory_df, new_row], ignore_index=True)
-        save_inventory(inventory_df)
-        st.success(f"Added: {new_item}")
-        st.experimental_rerun()
+    if submitted and new_item and new_location:
+        cursor.execute(
+            "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
+            (new_location, new_item.strip(), new_notes.strip(), int(new_quantity))
+        )
+        conn.commit()
+        st.sidebar.success(f"Added: {new_item}")
+        st.rerun()
 
-# ------------------- TABS -------------------
+# ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- INVENTORY TAB -------------------
-with tab_inventory:
-    st.subheader("Search Inventory")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: search_name = st.text_input("Item Name", key="inv_name")
-    with c2: cabinet = st.selectbox("Cabinet", ["All"] + [str(i) for i in range(1, 200)], key="inv_cab")
-    with c3: drawer  = st.selectbox("Drawer",  ["All"] + ["A","B","C","D","E","F"], key="inv_drawer")
-    with c4: qty_f   = st.number_input("Exact Qty", min_value=0, value=0, key="inv_qty")
+# ------------------- Helper: Cached Locations -------------------
+@st.cache_data(ttl=300)
+def get_locations():
+    df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
+    return sorted(df['location'].dropna().unique().tolist())
 
-    df = inventory_df.copy()
-    if search_name:
-        df = df[df["item"].str.contains(search_name, case=False, na=False)]
-    if cabinet != "All":
-        df = df[df["location"].str.startswith(str(cabinet))]
-    if drawer != "All":
-        df = df[df["location"].str.endswith(drawer)]
-    if qty_f > 0:
-        df = df[df["quantity"].astype(int) == qty_f]
+# ------------------- Inventory Tab (ALL RESULTS, NO PAGINATION) -------------------
+with tab_inventory:
+    st.subheader("Inventory Search")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: search_name = st.text_input("Item Name", key="inv_name")
+    with col2: cabinet = st.number_input("Cabinet #", min_value=0, step=1, key="inv_cabinet", value=0)
+    with col3: drawer = st.text_input("Drawer", key="inv_drawer").strip().upper()
+    with col4: qty_filter = st.number_input("Qty", min_value=0, step=1, key="inv_qty", value=0)
+
+    @st.cache_data(ttl=60)
+    def load_inventory(name="", cab=0, drw="", qty=0):
+        query = """
+        SELECT rowid AS id, location, item, notes, quantity
+        FROM inventory
+        WHERE 1=1
+        """
+        params = []
+        if name:
+            query += " AND item LIKE ?"
+            params.append(f"%{name}%")
+        if cab > 0:
+            query += " AND location LIKE ?"
+            params.append(f"{cab}%")
+        if drw:
+            query += " AND location LIKE ?"
+            params.append(f"%{drw}")
+        if qty > 0:
+            query += " AND quantity = ?"
+            params.append(qty)
+        query += " ORDER BY location, item"
+        return pd.read_sql_query(query, conn, params=params)
+
+    df = load_inventory(search_name, cabinet, drawer, qty_filter)
 
     if df.empty:
-        st.warning("No items found.")
+        st.info("No items found.")
     else:
-        st.write(f"**{len(df)} item(s) found**")
-        for idx, row in df.iterrows():
-            with st.expander(f"{row['item']} @ {row['location']} — Qty: {row['quantity']}"):
-                col_a, col_b = st.columns([3, 1])
-                with col_a:
-                    notes = st.text_area("Notes", value=row.get('notes', ''), key=f"n_{idx}", height=70)
-                    if st.button("Save Notes", key=f"s_{idx}"):
-                        inventory_df.loc[idx, "notes"] = notes.strip()
-                        save_inventory(inventory_df)
-                        st.success("Saved")
-                        st.experimental_rerun()
+        st.write(f"**Found {len(df)} item(s)**")
 
-                action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{idx}")
-                user   = st.text_input("Your Name", key=f"u_{idx}")
-                qty    = st.number_input("Qty", min_value=1, step=1, value=1, key=f"q_{idx}")
+        # SHOW ALL RESULTS — NO PAGINATION
+        for _, row in df.iterrows():
+            item_id = row['id']
+            location = row['location']
+            name = row['item']
+            notes = row['notes'] or ""
+            quantity = row['quantity']
 
-                bc1, bc2 = st.columns(2)
-                with bc1:
-                    if st.button("Submit", key=f"sub_{idx}") and action != "None" and user.strip():
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        new_tx = pd.DataFrame([{
-                            "item": row["item"],
-                            "action": action,
-                            "user": user.strip(),
-                            "timestamp": ts,
-                            "qty": qty
-                        }])
-                        transactions_df = pd.concat([transactions_df, new_tx], ignore_index=True)
-                        save_transactions(transactions_df)
+            with st.expander(f"{name} @ {location} — Qty: {quantity}"):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    edited_notes = st.text_area("Notes", value=notes, key=f"n_{item_id}", height=70)
+                    if st.button("Save Notes", key=f"s_{item_id}"):
+                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (edited_notes.strip(), item_id))
+                        conn.commit()
+                        st.success("Notes saved")
+                        st.rerun()
 
-                        cur_qty = int(row["quantity"])
-                        new_qty = cur_qty - qty if action == "Check Out" else cur_qty + qty
-                        inventory_df.loc[idx, "quantity"] = max(0, new_qty)
-                        save_inventory(inventory_df)
-                        st.success(f"{action}: {qty}")
-                        st.experimental_rerun()
+                action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{item_id}")
+                user = st.text_input("Your Name", key=f"u_{item_id}")
+                qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{item_id}", value=1)
 
-                with bc2:
-                    if st.button("Delete", key=f"del_{idx}") and user.strip():
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        del_tx = pd.DataFrame([{
-                            "item": row["item"],
-                            "action": "Deleted",
-                            "user": user.strip(),
-                            "timestamp": ts,
-                            "qty": row["quantity"]
-                        }])
-                        transactions_df = pd.concat([transactions_df, del_tx], ignore_index=True)
-                        save_transactions(transactions_df)
+                c1, c2 = st.columns(2)
+                with c1:
+                    submit = st.button("Submit", key=f"sub_{item_id}")
+                with c2:
+                    delete = st.button("Delete", key=f"del_{item_id}")
 
-                        inventory_df = inventory_df.drop(idx).reset_index(drop=True)
-                        save_inventory(inventory_df)
-                        st.warning("Deleted")
-                        st.experimental_rerun()
+                if submit and action != "None" and user.strip():
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                        (name, action, user.strip(), ts, qty)
+                    )
+                    new_qty = quantity - qty if action == "Check Out" else quantity + qty
+                    cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), item_id))
+                    conn.commit()
+                    st.success(f"{action}: {qty} of {name}")
+                    st.rerun()
 
-# ------------------- TRANSACTIONS TAB -------------------
+                if delete and user.strip():
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                        (name, "Deleted", user.strip(), ts, quantity)
+                    )
+                    cursor.execute("DELETE FROM inventory WHERE rowid = ?", (item_id,))
+                    conn.commit()
+                    st.warning(f"Deleted: {name}")
+                    st.rerun()
+
+# ------------------- Transactions Tab (FAST) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
+
     c1, c2, c3, c4 = st.columns(4)
     with c1: t_item = st.text_input("Item", key="t_item")
     with c2: t_user = st.text_input("User", key="t_user")
-    with c3: t_act  = st.selectbox("Action", ["All","Check Out","Check In","Deleted"], key="t_act")
-    with c4: t_qty  = st.number_input("Qty", min_value=0, value=0, key="t_qty")
+    with c3: t_action = st.selectbox("Action", ["All", "Check Out", "Check In", "Deleted"], key="t_action")
+    with c4: t_qty = st.number_input("Qty", min_value=0, step=1, key="t_qty", value=0)
 
-    start = st.date_input("From", value=datetime(2020,1,1), key="t_start")
-    end   = st.date_input("To",   value=datetime.today().date(), key="t_end")
-    s_str = start.strftime("%Y-%m-%d 00:00:00")
-    e_str = (end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
+    end_date = st.date_input("To", value=datetime.today(), key="t_end")
 
-    df_tx = transactions_df.copy()
-    df_tx = df_tx[(df_tx["timestamp"] >= s_str) & (df_tx["timestamp"] <= e_str)]
-    if t_item: df_tx = df_tx[df_tx["item"].str.contains(t_item, case=False, na=False)]
-    if t_user: df_tx = df_tx[df_tx["user"].str.contains(t_user, case=False, na=False)]
-    if t_act != "All": df_tx = df_tx[df_tx["action"] == t_act]
-    if t_qty > 0: df_tx = df_tx[df_tx["qty"].astype(int) == t_qty]
+    @st.cache_data(ttl=60)
+    def load_transactions(item="", user="", action="All", qty=0, s=start_date, e=end_date):
+        q = "SELECT * FROM transactions WHERE timestamp BETWEEN ? AND ?"
+        p = [s.strftime("%Y-%m-%d"), f"{e.strftime('%Y-%m-%d')} 23:59:59"]
+        if item: q += " AND item LIKE ?"; p.append(f"%{item}%")
+        if user: q += " AND user LIKE ?"; p.append(f"%{user}%")
+        if action != "All": q += " AND action = ?"; p.append(action)
+        if qty > 0: q += " AND qty = ?"; p.append(qty)
+        q += " ORDER BY timestamp DESC LIMIT 1000"
+        return pd.read_sql_query(q, conn, params=p)
+
+    df_tx = load_transactions(t_item, t_user, t_action, t_qty)
 
     if df_tx.empty:
         st.info("No transactions found.")
     else:
-        st.dataframe(df_tx[["timestamp","action","qty","item","user"]], use_container_width=True, hide_index=True)
+        st.dataframe(
+            df_tx[['timestamp', 'action', 'qty', 'item', 'user']],
+            use_container_width=True,
+            hide_index=True
+        )
 
-# ------------------- REPORTS TAB -------------------
+# ------------------- Reports Tab (ON-DEMAND) -------------------
 with tab_reports:
     st.subheader("Generate Report")
-    prefixes = sorted({loc[:2] for loc in inventory_df["location"] if len(loc) >= 2 and loc[:2].isdigit()})
+    locations = get_locations()
+    prefixes = sorted({loc[:2] for loc in locations if len(loc) >= 2})
 
     with st.form("report_form"):
         prefix = st.selectbox("Location Prefix", ["All"] + prefixes, key="r_prefix")
-        custom = st.text_input("Custom Location Filter", key="r_custom")
-        zero   = st.checkbox("Show only zero-quantity items", key="r_zero")
-        r_start = st.date_input("Start Date", value=datetime(2020,1,1), key="r_start")
-        r_end   = st.date_input("End Date", value=datetime.today().date(), key="r_end")
-        gen = st.form_submit_button("Generate Report")
+        custom_loc = st.text_input("Custom Location Filter", key="r_custom")
+        zero_only = st.checkbox("Show only zero-quantity items", key="r_zero")
+        r_start = st.date_input("Start Date", value=datetime(2020, 1, 1), key="r_start")
+        r_end = st.date_input("End Date", value=datetime.today(), key="r_end")
+        generate = st.form_submit_button("Generate Report")
 
-    if gen:
-        r_start_str = r_start.strftime("%Y-%m-%d 00:00:00")
-        r_end_str   = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    if generate:
+        @st.cache_data
+        def build_report(pfx, cust, zero_only, s, e):
+            q = """
+            SELECT rowid AS id, location, item, notes, quantity
+            FROM inventory
+            WHERE 1=1
+            """
+            p = []
+            if pfx != "All":
+                q += " AND location LIKE ?"
+                p.append(f"{pfx}%")
+            if cust:
+                q += " AND location LIKE ?"
+                p.append(f"%{cust}%")
+            if zero_only:
+                q += " AND quantity = 0"
+            df = pd.read_sql_query(q, conn, params=p)
 
-        df = inventory_df.copy()
-        if prefix != "All": df = df[df["location"].str.startswith(prefix)]
-        if custom: df = df[df["location"].str.contains(custom, case=False, na=False)]
-        if zero: df = df[df["quantity"].astype(int) == 0]
+            last_tx = pd.read_sql_query("""
+                SELECT item, MAX(timestamp) as last_tx 
+                FROM transactions 
+                GROUP BY item
+            """, conn)
+            df = df.merge(last_tx, on='item', how='left')
+            df['last_tx'] = pd.to_datetime(df['last_tx'], errors='coerce')
+            mask = df['last_tx'].isna() | ((df['last_tx'] >= pd.Timestamp(s)) & (df['last_tx'] <= pd.Timestamp(e)))
+            return df[mask]
 
-        tx = transactions_df[(transactions_df["timestamp"] >= r_start_str) &
-                            (transactions_df["timestamp"] <= r_end_str)]
-        if not tx.empty:
-            last = tx.loc[tx.groupby("item")["timestamp"].idxmax()][["item","timestamp"]]
-            last.rename(columns={"timestamp":"last_tx"}, inplace=True)
-            df = df.merge(last, on="item", how="left")
-        else:
-            df["last_tx"] = pd.NA
+        df_report = build_report(prefix, custom_loc, zero_only, r_start, r_end)
 
-        if df.empty:
-            st.warning("No data matches the filters.")
+        if df_report.empty:
+            st.warning("No data matches the selected filters.")
         else:
             st.write("### Report Preview")
-            st.dataframe(df, use_container_width=True)
+            display_cols = ['location', 'item', 'quantity', 'notes', 'last_tx']
+            st.dataframe(df_report[display_cols], use_container_width=True)
 
+            # In-memory PDF
             buffer = io.BytesIO()
             doc = fitz.open()
             page = doc.new_page(width=800, height=1100)
-            txt = "CNC1 Tool Crib Report\n\n" + df[["location","item","quantity","last_tx"]].to_string(index=False)
-            page.insert_text((50,50), txt, fontsize=9)
+            text = "CNC1 Tool Crib Inventory Report\n\n" + \
+                   df_report[['location', 'item', 'quantity', 'last_tx']].to_string(index=False)
+            page.insert_text((50, 50), text, fontsize=9)
             doc.save(buffer)
             doc.close()
             buffer.seek(0)
 
             st.download_button(
-                "Download PDF Report",
-                buffer.getvalue(),
-                f"report_{datetime.now():%Y%m%d}.pdf",
-                "application/pdf"
+                label="Download PDF Report",
+                data=buffer.getvalue(),
+                file_name=f"tool_crib_report_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf"
             )
