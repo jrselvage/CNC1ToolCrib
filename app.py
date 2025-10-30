@@ -92,7 +92,7 @@ uploaded_file = st.sidebar.file_uploader("Upload .xlsx backup", type=["xlsx"], k
 
 if uploaded_file:
     try:
-        # Read both sheets
+        # Read both sheets (xlsxwriter can read too)
         dfs = pd.read_excel(uploaded_file, sheet_name=None)
 
         inv_df = dfs.get("Inventory", pd.DataFrame())
@@ -249,7 +249,7 @@ with tab_transactions:
     else:
         st.dataframe(df_tx[['timestamp','action','qty','item','user']], use_container_width=True, hide_index=True)
 
-        # --- EXPORT TRANSACTIONS TO EXCEL ---
+        # --- EXPORT TO EXCEL (xlsxwriter) ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             df_tx.to_excel(writer, sheet_name="Transactions", index=False)
@@ -301,7 +301,7 @@ with tab_reports:
             st.write("### Preview")
             st.dataframe(df_r, use_container_width=True)
 
-            # --- EXPORT TO EXCEL ---
+            # --- EXPORT TO EXCEL (xlsxwriter) ---
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                 df_r.to_excel(writer, sheet_name="Inventory Report", index=False)
