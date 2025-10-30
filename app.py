@@ -12,14 +12,17 @@ import os
 def backup_db():
     try:
         shutil.copy("inventory.db", "inventory_backup.db")
-    except Exception as e:
-        pass  # Silent fail
+    except:
+        pass
 
 # ------------------- SAFE DB CONNECTION -------------------
 DB_PATH = "inventory.db"
 
 @st.cache_resource
 def get_connection():
+    # Check if file exists first
+    if not os.path.exists(DB_PATH):
+        st.warning("inventory.db not found. Creating new database.")
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA cache_size=10000;")
@@ -89,6 +92,7 @@ with st.sidebar.form("add_item_form"):
         )
         conn.commit()
         backup_db()
+        st.cache_data.clear()  # Clear caches for refresh
         st.sidebar.success(f"Added: {new_item}")
         st.rerun()
 
@@ -166,6 +170,7 @@ with tab_inventory:
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
                             backup_db()
+                            st.cache_data.clear()  # Clear for refresh
                             st.success("Saved")
                             st.rerun()
                     action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
@@ -186,6 +191,7 @@ with tab_inventory:
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
                         backup_db()
+                        st.cache_data.clear()  # Clear for transactions to show
                         st.success(f"{action}: {qty}")
                         st.rerun()
 
@@ -196,10 +202,11 @@ with tab_inventory:
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
                         backup_db()
+                        st.cache_data.clear()  # Clear for refresh
                         st.warning("Deleted")
                         st.rerun()
 
-# ------------------- TRANSACTIONS TAB -------------------
+# ------------------- TRANSACTIONS TAB (FIXED DATE RANGE + REFRESH) -------------------
 with tab_transactions:
     st.subheader("Transaction History")
     c1, c2, c3, c4 = st.columns(4)
@@ -212,13 +219,14 @@ with tab_transactions:
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
     end_date = st.date_input("To", value=today, key="t_end")
 
+    # FIXED: Consistent date strings for cache
     start_str = start_date.strftime("%Y-%m-%d 00:00:00")
     end_str = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     @st.cache_data(ttl=60)
-    def load_transactions(item="", user="", action="All", qty=0, s=start_str, e=end_str):
+    def load_transactions(item="", user="", action="All", qty=0, start_time=start_str, end_time=end_str):
         q = "SELECT * FROM transactions WHERE timestamp BETWEEN ? AND ?"
-        p = [s, e]
+        p = [start_time, end_time]  # FIXED: Use correct params
         if item: q += " AND item LIKE ?"; p.append(f"%{item}%")
         if user: q += " AND user LIKE ?"; p.append(f"%{user}%")
         if action != "All": q += " AND action = ?"; p.append(action)
@@ -226,7 +234,7 @@ with tab_transactions:
         q += " ORDER BY timestamp DESC LIMIT 1000"
         return pd.read_sql_query(q, conn, params=p)
 
-    df_tx = load_transactions(t_item, t_user, t_action, t_qty)
+    df_tx = load_transactions(t_item, t_user, t_action, t_qty, start_str, end_str)  # FIXED: Pass correct params
     if df_tx.empty:
         st.info("No transactions found.")
     else:
