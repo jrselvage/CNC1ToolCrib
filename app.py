@@ -16,17 +16,28 @@ DB_PATH = "inventory.db"
 def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA cache_size=10000;")
     return conn
 
 conn = get_connection()
 cur = conn.cursor()
 
+# CREATE TABLES (4 columns only)
 cur.execute("""CREATE TABLE IF NOT EXISTS inventory (
-    location TEXT, item TEXT, notes TEXT, quantity INTEGER)""")
-cur.execute("""CREATE TABLE IF NOT EXISTS transactions (
-    item TEXT, action TEXT, user TEXT, timestamp TEXT, qty INTEGER)""")
+    location TEXT, 
+    item TEXT, 
+    notes TEXT, 
+    quantity INTEGER
+)""")
 
+cur.execute("""CREATE TABLE IF NOT EXISTS transactions (
+    item TEXT, 
+    action TEXT, 
+    user TEXT, 
+    timestamp TEXT, 
+    qty INTEGER
+)""")
+
+# Indexes
 cur.execute("CREATE INDEX IF NOT EXISTS idx_loc ON inventory(location)")
 cur.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
 conn.commit()
@@ -38,25 +49,23 @@ st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
 
 # -------------------------------------------------
-#  HELPERS – EXTRACT CABINET & DRAWER
+#  HELPERS – CABINET & DRAWER
 # -------------------------------------------------
 def extract_cabinet(loc):
-    match = re.search(r'\d{3}', str(loc))
-    return match.group(0) if match else None
+    m = re.search(r'\d{3}', str(loc))
+    return m.group(0) if m else None
 
 def extract_drawer(loc):
-    match = re.search(r'(?<=\d)[A-Za-z]', str(loc))
-    return match.group(0).upper() if match else None
+    m = re.search(r'(?<=\d)[A-Za-z]', str(loc))
+    return m.group(0).upper() if m else None
 
 def get_cabinets():
     df = pd.read_sql_query("SELECT location FROM inventory", conn)
-    cabs = [extract_cabinet(loc) for loc in df['location']]
-    return sorted({c for c in cabs if c}, key=int)
+    return sorted({c for c in (extract_cabinet(l) for l in df['location']) if c}, key=int)
 
 def get_drawers():
     df = pd.read_sql_query("SELECT location FROM inventory", conn)
-    drws = [extract_drawer(loc) for loc in df['location']]
-    return sorted({d for d in drws if d})
+    return sorted({d for d in (extract_drawer(l) for l in df['location']) if d})
 
 # -------------------------------------------------
 #  SIDEBAR – ADD ITEM
@@ -74,18 +83,20 @@ with st.sidebar.form("add_form", clear_on_submit=True):
         if len(clean_loc) < 4:
             st.error("Location must be like 105A")
         else:
-            cur.execute("INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
-                        (clean_loc, new_item.strip(), new_notes.strip(), int(new_qty)))
+            cur.execute(
+                "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
+                (clean_loc, new_item.strip(), new_notes.strip(), int(new_qty))
+            )
             conn.commit()
             st.success(f"Added {new_item} @ {clean_loc}")
             st.rerun()
 
 # -------------------------------------------------
-#  SIDEBAR – RESTORE FROM CSV (ROBUST COLUMN DETECTION)
+#  SIDEBAR – RESTORE FROM CSV (FIXED FOREVER)
 # -------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Restore from CSV")
-st.sidebar.caption("**Required:** `Location`, `Item` (any case, extra spaces OK)  \n**Optional:** `quantity`, `notes`, `last_tx`")
+st.sidebar.caption("**Required:** `Location`, `Item` (any case/spaces)  \n**Ignores:** `last_tx`, `id`, etc.")
 
 inv_csv = st.sidebar.file_uploader("Inventory CSV", type=["csv"], key="inv_csv")
 tx_csv  = st.sidebar.file_uploader("Transactions CSV", type=["csv"], key="tx_csv")
@@ -94,39 +105,43 @@ if inv_csv and tx_csv:
     if st.sidebar.button("Restore Database from CSV", type="primary"):
         with st.spinner("Restoring..."):
             try:
+                # READ CSVs
                 inv = pd.read_csv(inv_csv)
                 tx  = pd.read_csv(tx_csv)
 
-                # --- DEBUG: Show raw columns ---
-                st.write("**Detected Inventory Columns:**")
-                st.write(list(inv.columns))
+                # DEBUG: Show raw headers
+                st.write("**Detected Inventory Columns:**", list(inv.columns))
 
-                # Normalize column names
+                # CLEAN column names
                 inv.columns = [col.strip() for col in inv.columns]
-                tx.columns = [col.strip() for col in tx.columns]
+                tx.columns  = [col.strip() for col in tx.columns]
 
-                # Case-insensitive mapping
-                col_map = {col.lower(): col for col in inv.columns}
-                tx_map = {col.lower(): col for col in tx.columns}
+                # MAP to lowercase
+                inv_map = {col.lower(): col for col in inv.columns}
+                tx_map  = {col.lower(): col for col in tx.columns}
 
-                # Required: Location, Item
-                if 'location' not in col_map or 'item' not in col_map:
-                    st.error("Inventory CSV must have columns named **Location** and **Item** (any case, extra spaces OK)")
+                # REQUIRED: location, item
+                if 'location' not in inv_map or 'item' not in inv_map:
+                    st.error("CSV must have **Location** and **Item**")
                     st.stop()
 
-                # Rename to internal
+                # RENAME required
                 inv = inv.rename(columns={
-                    col_map['location']: 'location',
-                    col_map['item']: 'item',
-                    col_map.get('quantity', col_map.get('qty', '')): 'quantity',
-                    col_map.get('notes', ''): 'notes'
+                    inv_map['location']: 'location',
+                    inv_map['item']: 'item'
                 })
 
-                # Normalize location
+                # OPTIONAL: quantity, notes
+                if 'quantity' in inv_map:
+                    inv = inv.rename(columns={inv_map['quantity']: 'quantity'})
+                if 'notes' in inv_map:
+                    inv = inv.rename(columns={inv_map['notes']: 'notes'})
+
+                # NORMALIZE location
                 inv['location'] = inv['location'].astype(str).str.strip().str.upper()
                 inv['location'] = inv['location'].str.replace(r'[^0-9A-Z]', '', regex=True)
 
-                # Validate format
+                # FILTER valid: 105A
                 valid = inv['location'].str.match(r'^\d{3}[A-Z]$')
                 invalid = inv[~valid]
                 if len(invalid) > 0:
@@ -134,33 +149,33 @@ if inv_csv and tx_csv:
                     st.write(invalid[['location']].head())
                 inv = inv[valid].copy()
 
-                # Fill missing
+                # DEFAULTS
                 inv['quantity'] = pd.to_numeric(inv.get('quantity', 0), errors='coerce').fillna(0).astype(int)
                 inv['notes'] = inv.get('notes', '').fillna("").astype(str)
 
-                # --- TRANSACTIONS ---
+                # TRANSACTIONS
                 req_tx = ['item', 'action', 'user', 'timestamp', 'qty']
-                missing_tx = [c for c in req_tx if c not in tx_map]
-                if missing_tx:
-                    st.error(f"Transactions CSV missing: {', '.join(missing_tx)}")
+                missing = [c for c in req_tx if c not in tx_map]
+                if missing:
+                    st.error(f"Transactions missing: {', '.join(missing)}")
                     st.stop()
 
                 tx = tx.rename(columns={tx_map[c]: c for c in req_tx})
                 tx['qty'] = pd.to_numeric(tx['qty'], errors='coerce').fillna(0).astype(int)
 
-                # --- INSERT ---
+                # CLEAR & INSERT (EXPLICIT 4 COLUMNS!)
                 cur.execute("DELETE FROM inventory")
                 cur.execute("DELETE FROM transactions")
 
                 for _, r in inv.iterrows():
                     cur.execute(
-                        "INSERT INTO inventory (location, item, notes, quantity) VALUES (?,?,?,?)",
+                        "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
                         (r['location'], r['item'], r['notes'], r['quantity'])
                     )
 
                 for _, r in tx.iterrows():
                     cur.execute(
-                        "INSERT INTO transactions VALUES (?,?,?,?,?)",
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
                         (r['item'], r['action'], r['user'], r['timestamp'], r['qty'])
                     )
 
@@ -170,6 +185,7 @@ if inv_csv and tx_csv:
 
             except Exception as e:
                 st.error(f"Error: {e}")
+                st.write("Full error:", e)
 else:
     st.sidebar.info("Upload both CSV files to restore.")
 
@@ -204,7 +220,7 @@ with tab_inv:
     drawers = get_drawers()
 
     if not cabinets:
-        st.warning("No cabinets found. Check `Location` format (e.g., `105A`).")
+        st.warning("No cabinets found. Check `Location` (e.g., `105A`).")
     if not drawers:
         st.info("No drawers found. Need letter after number.")
 
@@ -250,7 +266,7 @@ with tab_inv:
 
                     if st.button("Submit", key=f"sub_{r['id']}") and act != "None" and usr:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        cur.execute("INSERT INTO transactions VALUES (?,?,?,?,?)",
+                        cur.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
                                     (r['item'], act, usr, ts, q_val))
                         new_qty = r['quantity'] - q_val if act == "Check Out" else r['quantity'] + q_val
                         cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (max(0, new_qty), r['id']))
