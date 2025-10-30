@@ -7,37 +7,65 @@ import io
 import re
 import shutil
 import os
+import subprocess
 
-# ------------------- AUTO BACKUP FUNCTION -------------------
-def auto_backup():
-    """Save inventory.db → inventory_backup.db after every change"""
+# ------------------- SECRETS (ADD IN STREAMLIT CLOUD) -------------------
+# In Streamlit Cloud → Settings → Secrets:
+# GITHUB_TOKEN = "your-personal-access-token"
+# REPO = "your-username/your-repo"
+# BRANCH = "main"
+
+# ------------------- AUTO-PULL ON STARTUP -------------------
+if os.path.exists(".git"):
     try:
-        shutil.copy("inventory.db", "inventory_backup.db")
-        st.toast("Auto-backup saved")                     # Fixed
+        subprocess.run(["git", "pull", "origin", st.secrets["BRANCH"]], check=True, capture_output=True)
+    except:
+        pass  # First run or no changes
+
+# ------------------- INIT GIT (FIRST RUN ONLY) -------------------
+if not os.path.exists(".git"):
+    subprocess.run(["git", "init"], check=True)
+    subprocess.run(["git", "checkout", "-b", st.secrets["BRANCH"]], check=True)
+
+# ------------------- AUTO-PUSH TO GITHUB -------------------
+def auto_push_to_github():
+    try:
+        # Configure git
+        subprocess.run(["git", "config", "user.email", "streamlit@app.com"], check=True)
+        subprocess.run(["git", "config", "user.name", "Streamlit App"], check=True)
+
+        # Set remote with token
+        token = st.secrets["GITHUB_TOKEN"]
+        repo = st.secrets["REPO"]
+        branch = st.secrets["BRANCH"]
+        remote_url = f"https://{token}@github.com/{repo}.git"
+        subprocess.run(["git", "remote", "set-url", "origin", remote_url], check=True)
+
+        # Stage DB
+        subprocess.run(["git", "add", "inventory.db"], check=True)
+
+        # Commit
+        commit_msg = f"Auto-save DB: {datetime.now():%Y-%m-%d %H:%M:%S}"
+        result = subprocess.run(["git", "commit", "-m", commit_msg], capture_output=True, text=True)
+        
+        if "nothing to commit" in result.stdout.lower():
+            return  # No changes
+
+        # Push
+        push = subprocess.run(["git", "push", "origin", f"HEAD:{branch}"], capture_output=True, text=True)
+        if push.returncode == 0:
+            st.toast("DB auto-saved to GitHub")
+        else:
+            st.toast(f"Push failed: {push.stderr}")
     except Exception as e:
-        st.toast(f"Backup failed: {e}")                   # Fixed
+        st.toast(f"Git error: {e}")
 
-# ------------------- DATABASE: LOAD OR RESTORE -------------------
+# ------------------- DATABASE SETUP -------------------
 DB_PATH = "inventory.db"
-
-def init_db():
-    if os.path.exists(DB_PATH):
-        return sqlite3.connect(DB_PATH, check_same_thread=False)
-    
-    st.error("inventory.db not found!")
-    st.info("Upload your database to restore.")
-    uploaded = st.file_uploader("Upload inventory.db", type="db", key="restore_db")
-    if uploaded:
-        with open(DB_PATH, "wb") as f:
-            f.write(uploaded.getbuffer())
-        auto_backup()
-        st.success("Database restored! Restarting...")
-        st.rerun()
-    st.stop()
 
 @st.cache_resource
 def get_connection():
-    conn = init_db()
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA cache_size=10000;")
     return conn
@@ -48,8 +76,23 @@ cursor = conn.cursor()
 # Create tables if missing
 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory'")
 if not cursor.fetchone():
-    cursor.execute("CREATE TABLE inventory (location TEXT, item TEXT, notes TEXT, quantity INTEGER)")
-    cursor.execute("CREATE TABLE transactions (item TEXT, action TEXT, user TEXT, timestamp TEXT, qty INTEGER)")
+    cursor.execute("""
+    CREATE TABLE inventory (
+        location TEXT,
+        item TEXT,
+        notes TEXT,
+        quantity INTEGER
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE transactions (
+        item TEXT,
+        action TEXT,
+        user TEXT,
+        timestamp TEXT,
+        qty INTEGER
+    )
+    """)
     for idx in [
         "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
         "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
@@ -58,13 +101,13 @@ if not cursor.fetchone():
     ]:
         cursor.execute(idx)
     conn.commit()
-    auto_backup()
+    auto_push_to_github()  # Save initial DB
 
 # ------------------- Page Config -------------------
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory Management System")
 
-# ------------------- DEBUG + AUTO DOWNLOAD -------------------
+# ------------------- DEBUG + DOWNLOAD -------------------
 col1, col2 = st.columns(2)
 with col1:
     if st.button("CHECK DB STATUS"):
@@ -78,8 +121,7 @@ with col2:
             "DOWNLOAD CURRENT DB",
             f,
             "inventory.db",
-            "application/octet-stream",
-            help="Download your full database"
+            "application/octet-stream"
         )
 
 # ------------------- Sidebar: Add Item -------------------
@@ -97,7 +139,7 @@ with st.sidebar.form("add_item_form", clear_on_submit=True):
             (new_location, new_item.strip(), new_notes.strip(), int(new_quantity))
         )
         conn.commit()
-        auto_backup()  # BACKUP AFTER ADD
+        auto_push_to_github()  # PUSH TO GITHUB
         st.cache_data.clear()
         st.success(f"Added: {new_item}")
         st.rerun()
@@ -164,7 +206,7 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
-                            auto_backup()  # BACKUP AFTER NOTES
+                            auto_push_to_github()
                             st.cache_data.clear()
                             st.success("Saved")
                             st.rerun()
@@ -185,7 +227,7 @@ with tab_inventory:
                         new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
-                        auto_backup()  # BACKUP AFTER CHECK OUT/IN
+                        auto_push_to_github()
                         st.cache_data.clear()
                         st.success(f"{action}: {qty}")
                         st.rerun()
@@ -196,7 +238,7 @@ with tab_inventory:
                                        (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
-                        auto_backup()  # BACKUP AFTER DELETE
+                        auto_push_to_github()
                         st.cache_data.clear()
                         st.warning("Deleted")
                         st.rerun()
@@ -234,5 +276,69 @@ with tab_transactions:
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
 
-# ------------------- REPORTS TAB (unchanged) -------------------
-# [Same as before — omitted for brevity]
+# ------------------- REPORTS TAB -------------------
+with tab_reports:
+    st.subheader("Generate Report")
+    @st.cache_data(ttl=300)
+    def _get_locations():
+        df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
+        return sorted(df['location'].dropna().unique().tolist())
+
+    locations = _get_locations()
+    prefixes = sorted({loc[:2] for loc in locations if len(loc) >= 2})
+
+    with st.form("report_form"):
+        prefix = st.selectbox("Location Prefix", ["All"] + prefixes, key="r_prefix")
+        custom_loc = st.text_input("Custom Location Filter", key="r_custom")
+        zero_only = st.checkbox("Show only zero-quantity items", key="r_zero")
+        r_start = st.date_input("Start Date", value=datetime(2020, 1, 1), key="r_start")
+        r_end = st.date_input("End Date", value=datetime.today().date(), key="r_end")
+        generate = st.form_submit_button("Generate Report")
+
+    if generate:
+        r_start_str = r_start.strftime("%Y-%m-%d 00:00:00")
+        r_end_str = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+
+        @st.cache_data
+        def build_report(pfx, cust, zero_only, s, e):
+            q = "SELECT location, item, quantity, notes FROM inventory WHERE 1=1"
+            p = []
+            if pfx != "All": q += " AND location LIKE ?"; p.append(f"{pfx}%")
+            if cust: q += " AND location LIKE ?"; p.append(f"%{cust}%")
+            if zero_only: q += " AND quantity = 0"
+            df = pd.read_sql_query(q, conn, params=p)
+
+            last_tx = pd.read_sql_query("""
+                SELECT item, MAX(timestamp) as last_tx
+                FROM transactions WHERE timestamp BETWEEN ? AND ?
+                GROUP BY item
+            """, conn, params=[s, e])
+            df = df.merge(last_tx, on='item', how='left')
+            df['last_tx'] = pd.to_datetime(df['last_tx'], errors='coerce')
+            mask = df['last_tx'].isna() | ((df['last_tx'] >= pd.Timestamp(s)) & (df['last_tx'] <= pd.Timestamp(e)))
+            return df[mask]
+
+        with st.spinner("Building report..."):
+            df_report = build_report(prefix, custom_loc, zero_only, r_start_str, r_end_str)
+
+        if df_report.empty:
+            st.warning("No data matches the filters.")
+        else:
+            st.write("### Report Preview")
+            st.dataframe(df_report, use_container_width=True)
+
+            buffer = io.BytesIO()
+            doc = fitz.open()
+            page = doc.new_page(width=800, height=1100)
+            text = "CNC1 Tool Crib Report\n\n" + df_report[['location', 'item', 'quantity', 'last_tx']].to_string(index=False)
+            page.insert_text((50, 50), text, fontsize=9)
+            doc.save(buffer)
+            doc.close()
+            buffer.seek(0)
+
+            st.download_button(
+                "Download PDF Report",
+                buffer.getvalue(),
+                f"report_{datetime.now():%Y%m%d}.pdf",
+                "application/pdf"
+            )
