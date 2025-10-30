@@ -18,7 +18,7 @@ def get_connection():
 conn = get_connection()
 cursor = conn.cursor()
 
-# Create tables (idempotent)
+# Create tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS inventory (
     location TEXT,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 )
 """)
 
-# Indexes – run once
+# Indexes
 for idx in [
     "CREATE INDEX IF NOT EXISTS idx_location ON inventory(location)",
     "CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)",
@@ -79,74 +79,91 @@ def _get_locations():
     return sorted(df['location'].dropna().unique().tolist())
 
 def get_locations():
-    # Only call the cached function when we really need it
     return _get_locations()
 
-# ------------------- INVENTORY TAB -------------------
+# ------------------- INVENTORY TAB (DEFAULT EMPTY + DROPDOWNS) -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
+
+    # Get unique cabinets and drawers
+    locations = get_locations()
+    cabinets = sorted({loc[:3] for loc in locations if len(loc) >= 3 and loc[:3].isdigit()})  # e.g., "105"
+    drawers = sorted({loc[3:] for loc in locations if len(loc) > 3 and loc[:3].isdigit()})  # e.g., "A"
+
     col1, col2, col3, col4 = st.columns(4)
-    with col1: search_name = st.text_input("Item Name", key="inv_name")
-    with col2: cabinet = st.number_input("Cabinet #", min_value=0, step=1, key="inv_cabinet", value=0)
-    with col3: drawer = st.text_input("Drawer", key="inv_drawer").strip().upper()
-    with col4: qty_filter = st.number_input("Qty", min_value=0, step=1, key="inv_qty", value=0)
+    with col1:
+        search_name = st.text_input("Item Name", key="inv_name", placeholder="Start typing...")
+    with col2:
+        cabinet_options = ["All"] + cabinets
+        cabinet = st.selectbox("Cabinet", options=cabinet_options, index=0, key="inv_cabinet")
+    with col3:
+        drawer_options = ["All"] + drawers
+        drawer = st.selectbox("Drawer", options=drawer_options, index=0, key="inv_drawer")
+    with col4:
+        qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
 
-    @st.cache_data(ttl=60)
-    def load_inventory(name="", cab=0, drw="", qty=0):
-        q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
-        p = []
-        if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
-        if cab > 0: q += " AND location LIKE ?"; p.append(f"{cab}%")
-        if drw: q += " AND location LIKE ?"; p.append(f"%{drw}")
-        if qty > 0: q += " AND quantity = ?"; p.append(qty)
-        q += " ORDER BY location, item"
-        return pd.read_sql_query(q, conn, params=p)
+    # Only run query if ANY filter is applied
+    has_filter = search_name or (cabinet != "All") or (drawer != "All") or (qty_filter > 0)
 
-    df = load_inventory(search_name, cabinet, drawer, qty_filter)
-
-    if df.empty:
-        st.info("No items found.")
+    if not has_filter:
+        st.info("Enter an item name, select a cabinet/drawer, or set a quantity to search.")
     else:
-        st.write(f"**Found {len(df)} item(s)**")
-        for _, row in df.iterrows():
-            with st.expander(f"{row['item']} @ {row['location']} — Qty: {row['quantity']}"):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    notes = st.text_area("Notes", value=row['notes'] or "", key=f"n_{row['id']}", height=70)
-                    if st.button("Save Notes", key=f"s_{row['id']}"):
-                        cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
+        @st.cache_data(ttl=60)
+        def load_inventory(name="", cab="All", drw="All", qty=0):
+            q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
+            p = []
+            if name: q += " AND item LIKE ?"; p.append(f"%{name}%")
+            if cab != "All": q += " AND location LIKE ?"; p.append(f"{cab}%")
+            if drw != "All": q += " AND location LIKE ?"; p.append(f"%{cab}{drw}")
+            if qty > 0: q += " AND quantity = ?"; p.append(qty)
+            q += " ORDER BY location, item"
+            return pd.read_sql_query(q, conn, params=p)
+
+        df = load_inventory(search_name, cabinet, drawer, qty_filter)
+
+        if df.empty:
+            st.warning("No items match your search.")
+        else:
+            st.write(f"**Found {len(df)} item(s)**")
+            for _, row in df.iterrows():
+                with st.expander(f"{row['item']} @ {row['location']} — Qty: {row['quantity']}"):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        notes = st.text_area("Notes", value=row['notes'] or "", key=f"n_{row['id']}", height=70)
+                        if st.button("Save Notes", key=f"s_{row['id']}"):
+                            cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
+                            conn.commit()
+                            st.success("Saved")
+                            st.rerun()
+
+                    action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
+                    user = st.text_input("Your Name", key=f"u_{row['id']}")
+                    qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{row['id']}", value=1)
+
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        submit = st.button("Submit", key=f"sub_{row['id']}")
+                    with c2:
+                        delete = st.button("Delete", key=f"del_{row['id']}")
+
+                    if submit and action != "None" and user.strip():
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
+                                       (row['item'], action, user.strip(), ts, qty))
+                        new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
+                        cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
-                        st.success("Saved")
+                        st.success(f"{action}: {qty}")
                         st.rerun()
 
-                action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{row['id']}")
-                user = st.text_input("Your Name", key=f"u_{row['id']}")
-                qty = st.number_input("Qty", min_value=1, step=1, key=f"q_{row['id']}", value=1)
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    submit = st.button("Submit", key=f"sub_{row['id']}")
-                with c2:
-                    delete = st.button("Delete", key=f"del_{row['id']}")
-
-                if submit and action != "None" and user.strip():
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
-                                   (row['item'], action, user.strip(), ts, qty))
-                    new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
-                    cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
-                    conn.commit()
-                    st.success(f"{action}: {qty}")
-                    st.rerun()
-
-                if delete and user.strip():
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
-                                   (row['item'], "Deleted", user.strip(), ts, row['quantity']))
-                    cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
-                    conn.commit()
-                    st.warning("Deleted")
-                    st.rerun()
+                    if delete and user.strip():
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cursor.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)",
+                                       (row['item'], "Deleted", user.strip(), ts, row['quantity']))
+                        cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
+                        conn.commit()
+                        st.warning("Deleted")
+                        st.rerun()
 
 # ------------------- TRANSACTIONS TAB (INSTANT) -------------------
 with tab_transactions:
@@ -161,7 +178,6 @@ with tab_transactions:
     start_date = st.date_input("From", value=datetime(2020, 1, 1), key="t_start")
     end_date = st.date_input("To", value=today, key="t_end")
 
-    # Full-day inclusive range
     start_str = start_date.strftime("%Y-%m-%d 00:00:00")
     end_str   = (end_date + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -187,7 +203,6 @@ with tab_transactions:
 with tab_reports:
     st.subheader("Generate Report")
 
-    # Lazy-load locations only when the tab is open
     locations = get_locations()
     prefixes = sorted({loc[:2] for loc in locations if len(loc) >= 2})
 
@@ -200,7 +215,6 @@ with tab_reports:
         generate = st.form_submit_button("Generate Report")
 
     if generate:
-        # Full-day range for last_tx
         r_start_str = r_start.strftime("%Y-%m-%d 00:00:00")
         r_end_str   = (r_end + timedelta(days=1) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
