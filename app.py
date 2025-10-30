@@ -5,22 +5,15 @@ import fitz
 from datetime import datetime, timedelta
 import io
 import re
+import shutil  # <-- IMPORT HERE
 
-
-# Add this function near the top
+# ------------------- AUTO BACKUP FUNCTION -------------------
 def backup_db():
-    import shutil
     try:
         shutil.copy("inventory.db", "inventory_backup.db")
-    except:
-        pass
+    except Exception as e:
+        pass  # Silent fail if backup not possible
 
-# Call it after every write operation, e.g.:
-if submitted:
-    # ... your insert code ...
-    conn.commit()
-    backup_db()  # Auto-backup
-    st.rerun()
 # ------------------- Database Setup -------------------
 DB_PATH = "inventory.db"
 
@@ -82,13 +75,14 @@ with st.sidebar.form("add_item_form"):
             (new_location, new_item.strip(), new_notes.strip(), int(new_quantity))
         )
         conn.commit()
+        backup_db()  # BACKUP AFTER ADD
         st.sidebar.success(f"Added: {new_item}")
         st.rerun()
 
 # ------------------- Tabs -------------------
 tab_inventory, tab_transactions, tab_reports = st.tabs(["Inventory", "Transactions", "Reports"])
 
-# ------------------- Helper: Parse Cabinets & Drawers (TRUE NUMERIC SORT) -------------------
+# ------------------- Helper: Parse Cabinets & Drawers (NUMERIC SORT) -------------------
 @st.cache_data(ttl=300)
 def get_cabinets_and_drawers():
     df = pd.read_sql_query("SELECT DISTINCT location FROM inventory WHERE location IS NOT NULL", conn)
@@ -102,10 +96,10 @@ def get_cabinets_and_drawers():
     for loc in locations:
         match = pattern.match(loc)
         if match:
-            cabinet_num = match.group(1)  # e.g., "20"
-            drawer = match.group(2).strip()  # e.g., "A"
+            cabinet_num = match.group(1)
+            drawer = match.group(2).strip()
             try:
-                cabinet_nums.add(int(cabinet_num))  # Convert to int → numeric sort
+                cabinet_nums.add(int(cabinet_num))
             except ValueError:
                 pass
             if drawer:
@@ -113,15 +107,14 @@ def get_cabinets_and_drawers():
         else:
             drawers.add(loc)
 
-    # Sort cabinets numerically: 1, 2, 3, ..., 20, 105
-    cabinets_sorted = sorted(cabinet_nums)  # int sort
-    cabinets_str = [str(c) for c in cabinets_sorted]  # back to str for display
+    cabinets_sorted = sorted(cabinet_nums)
+    cabinets_str = [str(c) for c in cabinets_sorted]
 
     return cabinets_str, sorted(drawers)
 
 cabinets, drawers = get_cabinets_and_drawers()
 
-# ------------------- INVENTORY TAB (FULLY WORKING) -------------------
+# ------------------- INVENTORY TAB -------------------
 with tab_inventory:
     st.subheader("Inventory Search")
 
@@ -137,7 +130,6 @@ with tab_inventory:
     with col4:
         qty_filter = st.number_input("Exact Qty", min_value=0, step=1, key="inv_qty", value=0)
 
-    # Only show results if any filter is used
     has_filter = search_name or (cabinet != "All") or (drawer != "All") or (qty_filter > 0)
 
     if not has_filter:
@@ -147,12 +139,9 @@ with tab_inventory:
         def load_inventory(name="", cab="All", drw="All", qty=0):
             q = "SELECT rowid AS id, location, item, notes, quantity FROM inventory WHERE 1=1"
             p = []
-
             if name:
                 q += " AND item LIKE ?"
                 p.append(f"%{name}%")
-
-            # Build location filter
             if cab != "All" and drw != "All":
                 q += " AND location LIKE ?"
                 p.append(f"{cab}{drw}")
@@ -162,11 +151,9 @@ with tab_inventory:
             elif drw != "All":
                 q += " AND location LIKE ?"
                 p.append(f"%{drw}")
-
             if qty > 0:
                 q += " AND quantity = ?"
                 p.append(qty)
-
             q += " ORDER BY location, item"
             return pd.read_sql_query(q, conn, params=p)
 
@@ -184,6 +171,7 @@ with tab_inventory:
                         if st.button("Save Notes", key=f"s_{row['id']}"):
                             cursor.execute("UPDATE inventory SET notes = ? WHERE rowid = ?", (notes.strip(), row['id']))
                             conn.commit()
+                            backup_db()  # BACKUP AFTER NOTES
                             st.success("Saved")
                             st.rerun()
 
@@ -204,6 +192,7 @@ with tab_inventory:
                         new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
                         cursor.execute("UPDATE inventory SET quantity = ? WHERE rowid = ?", (max(0, new_qty), row['id']))
                         conn.commit()
+                        backup_db()  # BACKUP AFTER CHECK OUT/IN
                         st.success(f"{action}: {qty}")
                         st.rerun()
 
@@ -213,6 +202,7 @@ with tab_inventory:
                                        (row['item'], "Deleted", user.strip(), ts, row['quantity']))
                         cursor.execute("DELETE FROM inventory WHERE rowid = ?", (row['id'],))
                         conn.commit()
+                        backup_db()  # BACKUP AFTER DELETE
                         st.warning("Deleted")
                         st.rerun()
 
@@ -249,8 +239,6 @@ with tab_transactions:
         st.info("No transactions found.")
     else:
         st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True, hide_index=True)
-
-
 
 # ------------------- REPORTS TAB -------------------
 with tab_reports:
