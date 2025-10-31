@@ -38,46 +38,41 @@ def get_drive_service():
         return build("drive", "v3", credentials=credentials)
     except Exception as e:
         logger.error(f"[SYNC] Auth failed: {e}")
-        st.error("Google Drive auth failed. Check secrets.")
+        st.error("Google Drive auth failed.")
         return None
 
 # =============================================
-# FORCE DOWNLOAD FROM DRIVE ON EVERY START
+# FORCE DOWNLOAD ON START
 # =============================================
 def download_db():
-    # Always delete local DB first
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
-        st.sidebar.warning("Local DB deleted — pulling fresh from Drive")
-        logger.info("[SYNC] Local DB deleted")
-
+        st.sidebar.warning("Local DB deleted — pulling from Drive")
     try:
         service = get_drive_service()
         if not service:
             return False
-        logger.info("[SYNC] Downloading latest DB from Google Drive...")
+        logger.info("[SYNC] Downloading DB...")
         request = service.files().get_media(fileId=DRIVE_FILE_ID)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
-        with st.spinner("Pulling latest database from Google Drive..."):
+        with st.spinner("Pulling latest DB..."):
             while not done:
                 status, done = downloader.next_chunk()
         fh.seek(0)
         with open(DB_PATH, "wb") as f:
             f.write(fh.read())
-        logger.info("[SYNC] Database restored from Google Drive")
         st.success("Database pulled from Google Drive")
         return True
     except Exception as e:
         logger.error(f"[SYNC] Download failed: {e}")
         st.error(f"Download failed: {e}")
-        st.info("Starting with empty DB.")
         open(DB_PATH, "a").close()
         return False
 
 # =============================================
-# UPLOAD TO DRIVE (NO VERSIONING)
+# UPLOAD
 # =============================================
 def upload_db():
     st.sidebar.warning("DEBUG: upload_db() CALLED")
@@ -85,22 +80,16 @@ def upload_db():
         service = get_drive_service()
         if not service:
             return
-        logger.info("[SYNC] Uploading to Google Drive...")
         media = MediaFileUpload(DB_PATH, mimetype="application/octet-stream")
-        response = service.files().update(
-            fileId=DRIVE_FILE_ID,
-            media_body=media
-        ).execute()
+        service.files().update(fileId=DRIVE_FILE_ID, media_body=media).execute()
         msg = f"Saved to Drive @ {datetime.now().strftime('%H:%M:%S')}"
         st.sidebar.success(msg)
         logger.info(f"[SYNC] {msg}")
     except Exception as e:
-        error_msg = f"Upload failed: {e}"
-        st.sidebar.error(error_msg)
-        logger.error(f"[SYNC ERROR] {error_msg}")
+        st.sidebar.error(f"Upload failed: {e}")
 
 # =============================================
-# AUTO-BACKUP THREAD
+# AUTO BACKUP
 # =============================================
 def run_auto_backup():
     schedule.every(BACKUP_INTERVAL_MINUTES).minutes.do(upload_db)
@@ -109,17 +98,16 @@ def run_auto_backup():
         time.sleep(30)
 
 # =============================================
-# STARTUP: ALWAYS PULL FROM DRIVE
+# STARTUP
 # =============================================
 if 'sync_started' not in st.session_state:
-    download_db()  # ← ALWAYS RUNS ON START
+    download_db()
     thread = threading.Thread(target=run_auto_backup, daemon=True)
     thread.start()
-    logger.info("[SYNC] Auto-backup thread started")
     st.session_state.sync_started = True
 
 # =============================================
-# DATABASE SETUP
+# DB SETUP
 # =============================================
 @st.cache_resource
 def get_connection():
@@ -145,13 +133,11 @@ conn.commit()
 # =============================================
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
-
 st.sidebar.success("Cloud Sync: ACTIVE")
-if os.path.exists(DB_PATH):
-    mod_time = datetime.fromtimestamp(os.path.getmtime(DB_PATH))
-    st.sidebar.caption(f"Last local update: {mod_time.strftime('%H:%M:%S')}")
 
-# Add Item
+# =============================================
+# ADD ITEM
+# =============================================
 st.sidebar.header("Add New Item")
 with st.sidebar.form("add_form", clear_on_submit=True):
     new_item = st.text_input("Item Name")
@@ -165,30 +151,30 @@ with st.sidebar.form("add_form", clear_on_submit=True):
         if not re.match(r'^\d{1,3}[A-Z]$', clean_loc):
             st.error("Invalid location")
         else:
-            cur.execute("INSERT INTO inventory VALUES (?, ?, ?, ?)", (clean_loc, new_item, new_notes, new_qty))
+            cur.execute(
+                "INSERT INTO inventory (location, item, notes, quantity) VALUES (?, ?, ?, ?)",
+                (clean_loc, new_item.strip(), new_notes.strip(), int(new_qty))
+            )
             conn.commit()
             st.success(f"Added {new_item}")
             upload_db()
             st.rerun()
 
-# Force Backup
+# =============================================
+# FORCE BACKUP
+# =============================================
 if st.sidebar.button("Force Backup Now"):
     upload_db()
 
-# Download DB
+# =============================================
+# DOWNLOAD DB
+# =============================================
 with open(DB_PATH, "rb") as f:
     st.sidebar.download_button("Download DB", f.read(), f"inventory_{datetime.now():%Y%m%d}.db")
 
-# Manual Restore
-uploaded = st.sidebar.file_uploader("Restore DB", type=["db"])
-if uploaded:
-    with open(DB_PATH, "wb") as f:
-        f.write(uploaded.getbuffer())
-    st.success("DB restored!")
-    upload_db()
-    st.rerun()
-
-# Tabs
+# =============================================
+# TABS
+# =============================================
 tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 
 with tab_inv:
@@ -220,7 +206,10 @@ with tab_inv:
                 qty = st.number_input("Qty", 1, key=f"q_{r['id']}")
                 if st.button("Submit", key=f"sub_{r['id']}") and act != "None" and usr:
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    cur.execute("INSERT INTO transactions VALUES (?, ?, ?, ?, ?)", (r['item'], act, usr, ts, qty))
+                    cur.execute(
+                        "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                        (r['item'], act, usr.strip(), ts, qty)
+                    )
                     new_qty = r['quantity'] - qty if act == "Check Out" else r['quantity'] + qty
                     cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (max(0, new_qty), r['id']))
                     conn.commit()
