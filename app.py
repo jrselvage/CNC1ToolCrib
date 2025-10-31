@@ -3,7 +3,6 @@ import sqlite3
 import pandas as pd
 import re
 from datetime import datetime
-import os.d
 import os
 import threading
 import time
