@@ -55,17 +55,24 @@ def download_db():
         return False
 
 # =============================================
-# UPLOAD TO GOOGLE DRIVE (OVERWRITE!)
+# UPLOAD TO GOOGLE DRIVE (OVERWRITE + VERSIONING)
 # =============================================
 def upload_db():
     try:
         service = get_drive_service()
         media = MediaFileUpload(DB_PATH, mimetype="application/octet-stream")
-        service.files().update(
-            fileId=DRIVE_FILE_ID,
-            media_body=media
-        ).execute()
+        
+        # Overwrite main file
+        service.files().update(fileId=DRIVE_FILE_ID, media_body=media).execute()
         st.sidebar.success(f"Saved to Drive @ {datetime.now().strftime('%H:%M:%S')}")
+        
+        # Auto-versioning: Save daily copy
+        today = datetime.now().strftime("%Y%m%d")
+        version_name = f"inventory_{today}.db"
+        try:
+            service.files().copy(fileId=DRIVE_FILE_ID, body={"name": version_name}).execute()
+        except:
+            pass  # Ignore if already exists
     except Exception as e:
         st.sidebar.error(f"Upload failed: {e}")
 
@@ -127,7 +134,7 @@ if st.session_state.get('sync_started', False):
 else:
     st.sidebar.warning("Cloud Sync: OFFLINE")
 
-# Last local file update
+# Last local update
 if os.path.exists(DB_PATH):
     mod_time = datetime.fromtimestamp(os.path.getmtime(DB_PATH))
     st.sidebar.caption(f"Last local update: {mod_time.strftime('%H:%M:%S')}")
@@ -329,7 +336,7 @@ with tab_tx:
     if df_tx.empty:
         st.info("No transactions yet.")
     else:
-        st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], use_container_width=True)
+        st.dataframe(df_tx[['timestamp', 'action', 'qty', 'item', 'user']], width="stretch")
 
 # =============================================
 # REPORTS TAB
@@ -340,6 +347,6 @@ with tab_rep:
     if df.empty:
         st.info("No items.")
     else:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
         csv = df.to_csv(index=False).encode()
         st.download_button("Download CSV", csv, f"report_{datetime.now():%Y%m%d}.csv", "text/csv")
