@@ -8,9 +8,16 @@ import threading
 import time
 import schedule
 import io
+import logging
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+
+# =============================================
+# LOGGING SETUP (SEE SYNC IN LOGS)
+# =============================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # =============================================
 # CONFIG: GOOGLE DRIVE API
@@ -23,20 +30,29 @@ BACKUP_INTERVAL_MINUTES = 3
 # GOOGLE DRIVE SERVICE
 # =============================================
 def get_drive_service():
-    credentials = service_account.Credentials.from_service_account_info(
-        st.secrets["google_drive"]["service_account"],
-        scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    return build("drive", "v3", credentials=credentials)
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["google_drive"]["service_account"],
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=credentials)
+    except Exception as e:
+        logger.error(f"[SYNC] Service creation failed: {e}")
+        st.error("Google Drive auth failed. Check secrets.")
+        return None
 
 # =============================================
 # DOWNLOAD FROM GOOGLE DRIVE
 # =============================================
 def download_db():
     if os.path.exists(DB_PATH):
+        logger.info("[SYNC] Local DB exists, skipping download.")
         return True
     try:
         service = get_drive_service()
+        if not service:
+            return False
+        logger.info("[SYNC] Starting download from Google Drive...")
         request = service.files().get_media(fileId=DRIVE_FILE_ID)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
@@ -47,34 +63,48 @@ def download_db():
         fh.seek(0)
         with open(DB_PATH, "wb") as f:
             f.write(fh.read())
+        logger.info("[SYNC] Database restored from Google Drive")
         st.success("Database restored from Google Drive")
         return True
     except Exception as e:
+        logger.error(f"[SYNC] Download failed: {e}")
         st.error(f"Download failed: {e}")
         st.info("Starting with empty database.")
         return False
 
 # =============================================
-# UPLOAD TO GOOGLE DRIVE (OVERWRITE + VERSIONING)
+# UPLOAD TO GOOGLE DRIVE (WITH DEBUG)
 # =============================================
 def upload_db():
+    st.sidebar.warning("DEBUG: upload_db() CALLED")  # ← YOU WILL SEE THIS
     try:
         service = get_drive_service()
+        if not service:
+            st.sidebar.error("Drive service failed")
+            return
+        logger.info("[SYNC] Starting upload to Google Drive...")
         media = MediaFileUpload(DB_PATH, mimetype="application/octet-stream")
+        response = service.files().update(
+            fileId=DRIVE_FILE_ID,
+            media_body=media
+        ).execute()
+        msg = f"Saved to Drive @ {datetime.now().strftime('%H:%M:%S')}"
+        st.sidebar.success(msg)
+        logger.info(f"[SYNC] {msg} | File ID: {response.get('id')}")
         
-        # Overwrite main file
-        service.files().update(fileId=DRIVE_FILE_ID, media_body=media).execute()
-        st.sidebar.success(f"Saved to Drive @ {datetime.now().strftime('%H:%M:%S')}")
-        
-        # Auto-versioning: Save daily copy
+        # Auto-versioning
         today = datetime.now().strftime("%Y%m%d")
         version_name = f"inventory_{today}.db"
         try:
             service.files().copy(fileId=DRIVE_FILE_ID, body={"name": version_name}).execute()
+            logger.info(f"[SYNC] Versioned backup: {version_name}")
         except:
-            pass  # Ignore if already exists
+            pass
     except Exception as e:
-        st.sidebar.error(f"Upload failed: {e}")
+        error_msg = f"Upload failed: {e}"
+        st.sidebar.error(error_msg)
+        logger.error(f"[SYNC ERROR] {error_msg}")
+        st.sidebar.code(f"Error: {type(e).__name__}")
 
 # =============================================
 # AUTO-BACKUP THREAD
@@ -91,6 +121,7 @@ if 'sync_started' not in st.session_state:
     if os.path.exists(DB_PATH):
         thread = threading.Thread(target=run_auto_backup, daemon=True)
         thread.start()
+        logger.info("[SYNC] Auto-backup thread started")
     st.session_state.sync_started = True
 
 # =============================================
@@ -98,6 +129,7 @@ if 'sync_started' not in st.session_state:
 # =============================================
 if not os.path.exists(DB_PATH):
     open(DB_PATH, "a").close()
+    logger.info("[DB] Created empty local database")
 
 # =============================================
 # DATABASE CONNECTION
@@ -182,7 +214,7 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             )
             conn.commit()
             st.success(f"Added {new_item} @ {clean_loc}")
-            upload_db()
+            upload_db()  # ← MUST BE HERE
             st.rerun()
 
 # =============================================
@@ -202,7 +234,6 @@ with open(DB_PATH, "rb") as f:
 if st.sidebar.button("Force Backup Now"):
     upload_db()
 
-# Manual restore
 uploaded = st.sidebar.file_uploader("Restore DB", type=["db"])
 if uploaded:
     with open(DB_PATH, "wb") as f:
@@ -257,7 +288,7 @@ with st.sidebar.expander("Toggle 0 to 1", expanded=False):
                 new_qty = 1 if qty == 0 else 0
                 cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (new_qty, rowid))
             conn.commit()
-            upload_db()
+            upload_db()  # ← MUST BE HERE
             st.success(f"Toggled {len(rows)} items")
             st.rerun()
 
@@ -309,7 +340,7 @@ with tab_inv:
                         if st.button("Save", key=f"sv_{r['id']}"):
                             cur.execute("UPDATE inventory SET notes=? WHERE rowid=?", (notes.strip(), r['id']))
                             conn.commit()
-                            upload_db()
+                            upload_db()  # ← MUST BE HERE
                             st.success("Saved")
                             st.rerun()
                     act = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{r['id']}")
@@ -323,7 +354,7 @@ with tab_inv:
                         new_qty = r['quantity'] - q_val if act == "Check Out" else r['quantity'] + q_val
                         cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (max(0, new_qty), r['id']))
                         conn.commit()
-                        upload_db()
+                        upload_db()  # ← MUST BE HERE
                         st.success(f"{act}: {q_val}")
                         st.rerun()
 
