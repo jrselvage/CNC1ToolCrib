@@ -6,22 +6,26 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # =============================================
-# DEBUG: SUPABASE CONNECTION
+# SUPABASE CONNECTION — FINAL FIX (IPv4 + SSL)
 # =============================================
 @st.cache_resource
 def get_connection():
     try:
-        st.info("Connecting to Supabase...")  # ← DEBUG
-        st.code(st.secrets["supabase"]["url"])  # ← SHOW URL (SAFE IN DEBUG)
+        st.info("Connecting to Supabase (IPv4 + SSL)...")
+        st.code(st.secrets["supabase"]["url"], language="text")  # Show URL for debug
         
-        conn = psycopg2.connect(st.secrets["supabase"]["url"])
-        st.success("Connected to Supabase!")
-        st.balloons()  # ← CELEBRATION!
+        conn = psycopg2.connect(
+            st.secrets["supabase"]["url"],
+            sslmode='require'
+        )
+        st.success("SUPABASE CONNECTED!")
+        st.balloons()  # CELEBRATION!
         return conn
     except Exception as e:
         st.error("Supabase connection FAILED")
         st.code(f"Error: {e}")
         st.warning("Check your password in Supabase → Settings → Database")
+        st.warning("URL must end with: ?sslmode=require&host=db.jpzhwolmzrxnkaxbvbqj.supabase.co")
         st.stop()
 
 # =============================================
@@ -31,19 +35,19 @@ conn = get_connection()
 cur = conn.cursor(cursor_factory=RealDictCursor)
 
 # =============================================
-# UI
+# PAGE CONFIG
 # =============================================
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
 st.sidebar.success("Supabase: LIVE")
 
 # =============================================
-# ADD ITEM
+# ADD NEW ITEM
 # =============================================
 st.sidebar.header("Add New Item")
 with st.sidebar.form("add_form", clear_on_submit=True):
     new_item = st.text_input("Item Name")
-    new_loc = st.text_input("Location (e.g., 5A)").strip().upper()
+    new_loc = st.text_input("Location (e.g., 5A, 12B)").strip().upper()
     new_qty = st.number_input("Quantity", min_value=0, value=0)
     new_notes = st.text_area("Notes")
     add = st.form_submit_button("Add Item")
@@ -51,7 +55,7 @@ with st.sidebar.form("add_form", clear_on_submit=True):
     if add and new_item and new_loc:
         clean_loc = re.sub(r'[^0-9A-Z]', '', new_loc)
         if not re.match(r'^\d{1,3}[A-Z]$', clean_loc):
-            st.error("Invalid location: Use format like 5A, 12B")
+            st.error("Invalid location. Use format: 5A, 12B, 105C")
         else:
             try:
                 cur.execute(
@@ -62,15 +66,34 @@ with st.sidebar.form("add_form", clear_on_submit=True):
                 st.success(f"Added: {new_item} @ {clean_loc}")
                 st.rerun()
             except Exception as e:
-                st.error("Add failed")
+                st.error("Failed to add item")
                 st.code(e)
 
 # =============================================
-# FORCE REFRESH
+# REFRESH BUTTON
 # =============================================
 if st.sidebar.button("Refresh Data"):
     st.cache_resource.clear()
     st.rerun()
+
+# =============================================
+# DOWNLOAD FULL REPORT
+# =============================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("Export")
+if st.sidebar.button("Download Full CSV"):
+    try:
+        df = pd.read_sql("SELECT * FROM inventory ORDER BY location", conn)
+        csv = df.to_csv(index=False).encode()
+        st.sidebar.download_button(
+            "Download CSV",
+            csv,
+            f"inventory_{datetime.now():%Y%m%d}.csv",
+            "text/csv"
+        )
+    except Exception as e:
+        st.sidebar.error("Export failed")
+        st.sidebar.code(e)
 
 # =============================================
 # TABS
@@ -83,23 +106,25 @@ tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 with tab_inv:
     st.subheader("Search Inventory")
     c1, c2 = st.columns(2)
-    with c1: name = st.text_input("Item Name", key="s_name")
-    with c2: loc = st.text_input("Location", key="s_loc")
+    with c1:
+        name = st.text_input("Item Name", key="search_name")
+    with c2:
+        loc = st.text_input("Location", key="search_loc")
 
-    q = "SELECT * FROM inventory WHERE 1=1"
+    query = "SELECT * FROM inventory WHERE 1=1"
     params = []
     if name:
-        q += " AND item ILIKE %s"
+        query += " AND item ILIKE %s"
         params.append(f"%{name}%")
     if loc:
-        q += " AND location ILIKE %s"
+        query += " AND location ILIKE %s"
         params.append(f"%{loc}%")
-    q += " ORDER BY location, item"
+    query += " ORDER BY location, item"
 
     try:
-        df = pd.read_sql(q, conn, params=params)
+        df = pd.read_sql(query, conn, params=params)
     except Exception as e:
-        st.error("Query failed")
+        st.error("Search failed")
         st.code(e)
         df = pd.DataFrame()
 
@@ -168,7 +193,12 @@ with tab_rep:
         else:
             st.dataframe(df, width="stretch")
             csv = df.to_csv(index=False).encode()
-            st.download_button("Download CSV", csv, f"report_{datetime.now():%Y%m%d}.csv", "text/csv")
+            st.download_button(
+                "Download CSV",
+                csv,
+                f"report_{datetime.now():%Y%m%d}.csv",
+                "text/csv"
+            )
     except Exception as e:
         st.error("Report failed")
         st.code(e)
