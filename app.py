@@ -7,63 +7,90 @@ import os
 import threading
 import time
 import schedule
+import io
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # =============================================
-# CONFIG: GOOGLE DRIVE SYNC
+# CONFIG: GOOGLE DRIVE API
 # =============================================
-GDRIVE_FILE_ID = "1aBcDeFgHiJkLmN1234567890"  # ← CHANGE THIS!
+DRIVE_FILE_ID = "1LK4IygkqQCHGC02W8KufRIixIqNpHux6"
 DB_PATH = "inventory.db"
-BACKUP_INTERVAL_MINUTES = 3  # Auto-save every 3 mins
+BACKUP_INTERVAL_MINUTES = 3
 
 # =============================================
-# AUTO DOWNLOAD / UPLOAD FROM GOOGLE DRIVE
+# GOOGLE DRIVE SERVICE
 # =============================================
-def download_db_from_drive():
-    if not os.path.exists(DB_PATH):
-        try:
-            import gdown
-            with st.spinner("Downloading database from Google Drive..."):
-                url = f"https://drive.google.com/uc?id=1LK4IygkqQCHGC02W8KufRIixIqNpHux6/view?usp=sharing"
-                gdown.download(url, DB_PATH, quiet=False)
-            st.success("Database restored from Google Drive")
-            return True
-        except Exception as e:
-            st.error(f"Failed to download DB: {e}")
-            return False
-    return True
+def get_drive_service():
+    credentials = service_account.Credentials.from_service_account_info(
+        st.secrets["google_drive"]["service_account"],
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=credentials)
 
-def upload_db_to_drive():
+# =============================================
+# DOWNLOAD FROM GOOGLE DRIVE
+# =============================================
+def download_db():
+    if os.path.exists(DB_PATH):
+        return True
     try:
-        import gdown
-        url = f"https://drive.google.com/uc?id=1LK4IygkqQCHGC02W8KufRIixIqNpHux6/view?usp=sharing"
-        gdown.upload(DB_PATH, url, resume=True)
-        st.sidebar.success(f"DB auto-saved to Drive @ {datetime.now():%H:%M}")
+        service = get_drive_service()
+        request = service.files().get_media(fileId=DRIVE_FILE_ID)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        with st.spinner("Downloading database from Google Drive..."):
+            while not done:
+                status, done = downloader.next_chunk()
+        fh.seek(0)
+        with open(DB_PATH, "wb") as f:
+            f.write(fh.read())
+        st.success("Database restored from Google Drive")
+        return True
     except Exception as e:
-        st.sidebar.error(f"Backup failed: {e}")
+        st.error(f"Download failed: {e}")
+        st.info("Starting with empty database.")
+        return False
 
-# Background auto-backup
+# =============================================
+# UPLOAD TO GOOGLE DRIVE (OVERWRITE!)
+# =============================================
+def upload_db():
+    try:
+        service = get_drive_service()
+        media = MediaFileUpload(DB_PATH, mimetype="application/octet-stream")
+        service.files().update(
+            fileId=DRIVE_FILE_ID,
+            media_body=media
+        ).execute()
+        st.sidebar.success(f"Saved to Drive @ {datetime.now().strftime('%H:%M:%S')}")
+    except Exception as e:
+        st.sidebar.error(f"Upload failed: {e}")
+
+# =============================================
+# AUTO-BACKUP THREAD
+# =============================================
 def run_auto_backup():
-    schedule.every(BACKUP_INTERVAL_MINUTES).minutes.do(upload_db_to_drive)
+    schedule.every(BACKUP_INTERVAL_MINUTES).minutes.do(upload_db)
     while True:
         schedule.run_pending()
         time.sleep(30)
 
-# Start backup thread (once)
-if 'drive_sync_started' not in st.session_state:
-    if download_db_from_drive():
+# Start sync once
+if 'sync_started' not in st.session_state:
+    download_db()
+    if os.path.exists(DB_PATH):
         thread = threading.Thread(target=run_auto_backup, daemon=True)
         thread.start()
-        st.session_state.drive_sync_started = True
-    else:
-        st.warning("Using local DB (will be lost on reboot unless backed up)")
+    st.session_state.sync_started = True
 
 # =============================================
-# ENSURE DB EXISTS LOCALLY
+# ENSURE LOCAL DB EXISTS
 # =============================================
 if not os.path.exists(DB_PATH):
-    # Create empty DB if download failed
-    conn = sqlite3.connect(DB_PATH)
-    conn.close()
+    open(DB_PATH, "a").close()
 
 # =============================================
 # DATABASE CONNECTION
@@ -84,8 +111,6 @@ cur.execute("""CREATE TABLE IF NOT EXISTS inventory (
 cur.execute("""CREATE TABLE IF NOT EXISTS transactions (
     item TEXT, action TEXT, user TEXT, timestamp TEXT, qty INTEGER
 )""")
-
-# Indexes
 cur.execute("CREATE INDEX IF NOT EXISTS idx_loc ON inventory(location)")
 cur.execute("CREATE INDEX IF NOT EXISTS idx_item ON inventory(item)")
 conn.commit()
@@ -95,6 +120,17 @@ conn.commit()
 # =============================================
 st.set_page_config(page_title="CNC1 Tool Crib", layout="wide")
 st.title("CNC1 Tool Crib Inventory System")
+
+# Sync status
+if st.session_state.get('sync_started', False):
+    st.sidebar.success("Cloud Sync: ACTIVE")
+else:
+    st.sidebar.warning("Cloud Sync: OFFLINE")
+
+# Last local file update
+if os.path.exists(DB_PATH):
+    mod_time = datetime.fromtimestamp(os.path.getmtime(DB_PATH))
+    st.sidebar.caption(f"Last local update: {mod_time.strftime('%H:%M:%S')}")
 
 # =============================================
 # HELPERS
@@ -139,31 +175,33 @@ with st.sidebar.form("add_form", clear_on_submit=True):
             )
             conn.commit()
             st.success(f"Added {new_item} @ {clean_loc}")
-            upload_db_to_drive()  # Immediate backup
+            upload_db()
             st.rerun()
 
 # =============================================
-# SIDEBAR: MANUAL BACKUP/RESTORE
+# SIDEBAR: MANUAL BACKUP
 # =============================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("Manual Backup")
+st.sidebar.subheader("Backup Tools")
 
-# Download
 with open(DB_PATH, "rb") as f:
     st.sidebar.download_button(
-        "Download inventory.db",
+        "Download DB",
         f.read(),
-        file_name=f"inventory_backup_{datetime.now():%Y%m%d_%H%M}.db",
+        file_name=f"inventory_{datetime.now():%Y%m%d_%H%M}.db",
         mime="application/octet-stream"
     )
 
-# Upload (fallback)
-uploaded = st.sidebar.file_uploader("Restore from backup", type=["db"])
+if st.sidebar.button("Force Backup Now"):
+    upload_db()
+
+# Manual restore
+uploaded = st.sidebar.file_uploader("Restore DB", type=["db"])
 if uploaded:
     with open(DB_PATH, "wb") as f:
         f.write(uploaded.getbuffer())
-    st.success("Database restored from upload!")
-    upload_db_to_drive()
+    st.success("DB restored!")
+    upload_db()
     st.rerun()
 
 # =============================================
@@ -176,10 +214,10 @@ ADMIN_PASSWORD = "surgeprotection"
 if 'admin_authenticated' not in st.session_state:
     st.session_state.admin_authenticated = False
 
-with st.sidebar.expander("Admin: Toggle 0 to 1", expanded=False):
+with st.sidebar.expander("Toggle 0 to 1", expanded=False):
     if not st.session_state.admin_authenticated:
-        pwd = st.text_input("Password", type="password", key="admin_pwd")
-        if st.button("Login", key="admin_login"):
+        pwd = st.text_input("Password", type="password")
+        if st.button("Login"):
             if pwd == ADMIN_PASSWORD:
                 st.session_state.admin_authenticated = True
                 st.rerun()
@@ -191,35 +229,30 @@ with st.sidebar.expander("Admin: Toggle 0 to 1", expanded=False):
             st.session_state.admin_authenticated = False
             st.rerun()
 
-        st.markdown("**Toggle 0 ↔ 1**")
         cabinets = get_cabinets()
         drawers = get_drawers()
+        toggle_cab = st.selectbox("Cabinet", ["All"] + cabinets)
+        toggle_drw = st.selectbox("Drawer", ["All"] + drawers)
 
-        toggle_cab = st.selectbox("Cabinet", ["All"] + cabinets, key="toggle_cab")
-        toggle_drw = st.selectbox("Drawer", ["All"] + drawers, key="toggle_drw")
+        if st.button("Toggle 0 to 1"):
+            q = "SELECT rowid, quantity FROM inventory WHERE 1=1"
+            p = []
+            if toggle_cab != "All" and toggle_drw != "All":
+                q += " AND location = ?"; p.append(f"{toggle_cab}{toggle_drw}")
+            elif toggle_cab != "All":
+                q += " AND location LIKE ?"; p.append(f"{toggle_cab}%")
+            elif toggle_drw != "All":
+                q += " AND location LIKE ?"; p.append(f"%{toggle_drw}")
 
-        if st.button("Toggle 0 to 1", type="primary"):
-            with st.spinner("Updating..."):
-                q = "SELECT rowid, quantity FROM inventory WHERE 1=1"
-                p = []
-                if toggle_cab != "All" and toggle_drw != "All":
-                    q += " AND location = ?"; p.append(f"{toggle_cab}{toggle_drw}")
-                elif toggle_cab != "All":
-                    q += " AND location LIKE ?"; p.append(f"{toggle_cab}%")
-                elif toggle_drw != "All":
-                    q += " AND location LIKE ?"; p.append(f"%{toggle_drw}")
-
-                cur.execute(q, p)
-                rows = cur.fetchall()
-                updated = 0
-                for rowid, qty in rows:
-                    new_qty = 1 if qty == 0 else 0
-                    cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (new_qty, rowid))
-                    updated += 1
-                conn.commit()
-                upload_db_to_drive()  # Backup after admin change
-                st.success(f"Toggled {updated} items")
-                st.rerun()
+            cur.execute(q, p)
+            rows = cur.fetchall()
+            for rowid, qty in rows:
+                new_qty = 1 if qty == 0 else 0
+                cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (new_qty, rowid))
+            conn.commit()
+            upload_db()
+            st.success(f"Toggled {len(rows)} items")
+            st.rerun()
 
 # =============================================
 # TABS
@@ -231,23 +264,16 @@ tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 # =============================================
 with tab_inv:
     st.subheader("Search Inventory")
-
     cabinets = get_cabinets()
     drawers = get_drawers()
 
-    if not cabinets:
-        st.warning("No cabinets found. Add items with locations like 5A.")
-    if not drawers:
-        st.info("No drawers found. Use letters like 5A, 12B.")
-
     c1, c2, c3, c4 = st.columns(4)
     with c1: name = st.text_input("Item Name", key="s_name")
-    with c2: cab = st.selectbox("Cabinet #", ["All"] + cabinets, key="s_cab")
+    with c2: cab = st.selectbox("Cabinet", ["All"] + cabinets, key="s_cab")
     with c3: drw = st.selectbox("Drawer", ["All"] + drawers, key="s_drw")
-    with c4: qty = st.number_input("Exact Qty", min_value=0, value=0, key="s_qty")
+    with c4: qty = st.number_input("Qty", min_value=0, value=0, key="s_qty")
 
     has_filter = name or (cab != "All") or (drw != "All") or (qty > 0)
-
     if not has_filter:
         st.info("Use filters to search.")
     else:
@@ -264,20 +290,19 @@ with tab_inv:
         q += " ORDER BY location, item"
 
         df = pd.read_sql_query(q, conn, params=p)
-
         if df.empty:
             st.warning("No items found.")
         else:
-            st.write(f"**{len(df)} item(s) found**")
+            st.write(f"**{len(df)} item(s)**")
             for _, r in df.iterrows():
                 with st.expander(f"{r['item']} @ {r['location']} — Qty: {r['quantity']}"):
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        notes = st.text_area("Notes", value=r['notes'] or "", key=f"n_{r['id']}", height=70)
+                        notes = st.text_area("Notes", value=r['notes'] or "", key=f"n_{r['id']}")
                         if st.button("Save", key=f"sv_{r['id']}"):
                             cur.execute("UPDATE inventory SET notes=? WHERE rowid=?", (notes.strip(), r['id']))
                             conn.commit()
-                            upload_db_to_drive()
+                            upload_db()
                             st.success("Saved")
                             st.rerun()
                     act = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"a_{r['id']}")
@@ -286,14 +311,12 @@ with tab_inv:
 
                     if st.button("Submit", key=f"sub_{r['id']}") and act != "None" and usr.strip():
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        cur.execute(
-                            "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
-                            (r['item'], act, usr.strip(), ts, q_val)
-                        )
+                        cur.execute("INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (?, ?, ?, ?, ?)",
+                                    (r['item'], act, usr.strip(), ts, q_val))
                         new_qty = r['quantity'] - q_val if act == "Check Out" else r['quantity'] + q_val
                         cur.execute("UPDATE inventory SET quantity=? WHERE rowid=?", (max(0, new_qty), r['id']))
                         conn.commit()
-                        upload_db_to_drive()
+                        upload_db()
                         st.success(f"{act}: {q_val}")
                         st.rerun()
 
@@ -312,16 +335,11 @@ with tab_tx:
 # REPORTS TAB
 # =============================================
 with tab_rep:
-    st.subheader("Full Inventory Report")
+    st.subheader("Full Report")
     df = pd.read_sql_query("SELECT location, item, quantity, notes FROM inventory ORDER BY location", conn)
     if df.empty:
         st.info("No items.")
     else:
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False).encode()
-        st.download_button(
-            "Download CSV",
-            csv,
-            file_name=f"inventory_report_{datetime.now():%Y%m%d}.csv",
-            mime="text/csv"
-        )
+        st.download_button("Download CSV", csv, f"report_{datetime.now():%Y%m%d}.csv", "text/csv")
