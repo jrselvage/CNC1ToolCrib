@@ -4,35 +4,75 @@ import re
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import socket
+import time
 
 # =============================================
-# SUPABASE CONNECTION — HARDCODED IP (NO DNS)
+# SUPABASE CONNECTION — IPv6 PRIMARY + IPv4 FALLBACK + RETRIES
 # =============================================
-@st.cache_resource
+@st.cache_resource(ttl=300)  # Cache 5 min
 def get_connection():
-    try:
-        host = st.secrets["supabase"]["host"]  # Hardcoded IP from nslookup
-        st.info(f"Connecting to Supabase IP: {host}:5432...")
-        
-        conn = psycopg2.connect(
-            host=host,
-            port=5432,
-            user="postgres",
-            password=st.secrets["supabase"]["password"],
-            database="postgres",
-            sslmode="require"
-        )
-        st.success("SUPABASE CONNECTED!")
-        st.balloons()
+    password = st.secrets["supabase"]["password"]
+    primary_host = st.secrets["supabase"]["host"]  # IPv6: 2600:1f16:1cd0:333f:9551:240c:8a4d:f52d
+    domain = "db.jpzhwolmzrxnkaxbvbqj.supabase.co"
+
+    def try_connect(host, attempts=3):
+        for i in range(attempts):
+            try:
+                st.info(f"🔄 Connecting to {host}:5432 (attempt {i+1}/{attempts})...")
+                conn = psycopg2.connect(
+                    host=host,
+                    port=5432,
+                    user="postgres",
+                    password=password,
+                    database="postgres",
+                    sslmode="require",
+                    connect_timeout=15,  # Increased timeout
+                    keepalives=1,
+                    keepalives_idle=30
+                )
+                # Quick test query
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                st.success(f"✅ SUPABASE CONNECTED! ({host})")
+                st.balloons()
+                return conn
+            except Exception as e:
+                st.warning(f"Attempt {i+1} failed: {e}")
+                if i < attempts - 1:
+                    time.sleep(2)  # Wait before retry
+                continue
+        return None
+
+    # ATTEMPT 1: Primary (your IPv6)
+    st.info("🚀 Primary: IPv6 Hardcoded")
+    conn = try_connect(primary_host)
+    if conn:
         return conn
+
+    # ATTEMPT 2: Fallback to IPv4 resolution
+    st.info("🔄 Fallback: Resolve IPv4 from DNS")
+    try:
+        resolved_ip = socket.getaddrinfo(domain, 5432, family=socket.AF_INET)[0][4][0]
+        st.code(f"Resolved IPv4: {resolved_ip}")
+        conn = try_connect(resolved_ip)
+        if conn:
+            return conn
     except Exception as e:
-        st.error("Connection FAILED")
-        st.code(f"Error: {e}")
-        st.warning("Check your Supabase IP (from nslookup) and password.")
-        st.stop()
+        st.warning(f"IPv4 resolution failed: {e}")
+
+    # FINAL ERROR
+    st.error("❌ ALL CONNECTIONS FAILED")
+    st.warning("💡 IMMEDIATE FIXES:\n"
+               "1. Verify password in Supabase Dashboard → Settings → Database.\n"
+               "2. Check project status (not paused/billed).\n"
+               "3. Run locally: `psql 'host=2600:1f16:1cd0:333f:9551:240c:8a4d:f52d port=5432 dbname=postgres user=postgres password=surgeprotection sslmode=require' -c 'SELECT 1;'`\n"
+               "4. If IPv6 fails locally, reply with output — we'll switch to Supabase SDK.")
+    st.stop()
 
 # =============================================
-# CONNECT TO DATABASE
+# CONNECT
 # =============================================
 conn = get_connection()
 cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -45,7 +85,7 @@ st.title("CNC1 Tool Crib Inventory System")
 st.sidebar.success("Supabase: LIVE")
 
 # =============================================
-# ADD NEW ITEM (SIDEBAR)
+# ADD NEW ITEM
 # =============================================
 st.sidebar.header("Add New Item")
 with st.sidebar.form("add_form", clear_on_submit=True):
@@ -57,11 +97,11 @@ with st.sidebar.form("add_form", clear_on_submit=True):
 
     if add:
         if not new_item or not new_loc:
-            st.error("Item name and location are required.")
+            st.error("Item name and location required.")
         else:
             clean_loc = re.sub(r'[^0-9A-Z]', '', new_loc)
             if not re.match(r'^\d{1,3}[A-Z]$', clean_loc):
-                st.error("Invalid location format. Use: 1A, 12B, 999Z")
+                st.error("Invalid location. Use: 1A, 12B, 999Z")
             else:
                 try:
                     cur.execute(
@@ -73,17 +113,17 @@ with st.sidebar.form("add_form", clear_on_submit=True):
                     st.rerun()
                 except Exception as e:
                     st.error("Add failed")
-                    st.code(e)
+                    st.code(str(e))
 
 # =============================================
-# REFRESH BUTTON
+# REFRESH
 # =============================================
-if st.sidebar.button("Refresh Data"):
+if st.sidebar.button("🔄 Refresh Connection & Data"):
     st.cache_resource.clear()
     st.rerun()
 
 # =============================================
-# TABS: INVENTORY, TRANSACTIONS, REPORTS
+# TABS
 # =============================================
 tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 
@@ -93,12 +133,9 @@ tab_inv, tab_tx, tab_rep = st.tabs(["Inventory", "Transactions", "Reports"])
 with tab_inv:
     st.subheader("Search Inventory")
     c1, c2 = st.columns(2)
-    with c1:
-        name_filter = st.text_input("Item Name", key="inv_name")
-    with c2:
-        loc_filter = st.text_input("Location", key="inv_loc")
+    with c1: name_filter = st.text_input("Item Name", key="inv_name")
+    with c2: loc_filter = st.text_input("Location", key="inv_loc")
 
-    # Build query
     query = "SELECT * FROM inventory WHERE 1=1"
     params = []
     if name_filter:
@@ -112,8 +149,8 @@ with tab_inv:
     try:
         df = pd.read_sql(query, conn, params=params)
     except Exception as e:
-        st.error("Failed to load inventory")
-        st.code(e)
+        st.error("Query failed")
+        st.code(str(e))
         df = pd.DataFrame()
 
     if df.empty:
@@ -125,27 +162,15 @@ with tab_inv:
                 col1, col2 = st.columns([3, 1])
 
                 with col1:
-                    notes = st.text_area(
-                        "Notes", 
-                        value=row['notes'] or "", 
-                        key=f"notes_{row['id']}",
-                        height=100
-                    )
+                    notes = st.text_area("Notes", value=row['notes'] or "", key=f"notes_{row['id']}", height=100)
                     if st.button("Save Notes", key=f"save_{row['id']}"):
-                        cur.execute(
-                            "UPDATE inventory SET notes = %s WHERE id = %s",
-                            (notes, row['id'])
-                        )
+                        cur.execute("UPDATE inventory SET notes = %s WHERE id = %s", (notes, row['id']))
                         conn.commit()
                         st.success("Notes saved!")
                         st.rerun()
 
                 with col2:
-                    action = st.selectbox(
-                        "Action", 
-                        ["None", "Check Out", "Check In"], 
-                        key=f"act_{row['id']}"
-                    )
+                    action = st.selectbox("Action", ["None", "Check Out", "Check In"], key=f"act_{row['id']}")
                     user = st.text_input("User", key=f"user_{row['id']}")
                     qty = st.number_input("Qty", min_value=1, value=1, key=f"qty_{row['id']}")
 
@@ -158,22 +183,17 @@ with tab_inv:
                             try:
                                 ts = datetime.now()
                                 cur.execute(
-                                    """INSERT INTO transactions 
-                                    (item, action, user, timestamp, qty) 
-                                    VALUES (%s, %s, %s, %s, %s)""",
+                                    "INSERT INTO transactions (item, action, user, timestamp, qty) VALUES (%s, %s, %s, %s, %s)",
                                     (row['item'], action, user.strip(), ts, qty)
                                 )
                                 new_qty = row['quantity'] - qty if action == "Check Out" else row['quantity'] + qty
-                                cur.execute(
-                                    "UPDATE inventory SET quantity = %s WHERE id = %s",
-                                    (max(0, new_qty), row['id'])
-                                )
+                                cur.execute("UPDATE inventory SET quantity = %s WHERE id = %s", (max(0, new_qty), row['id']))
                                 conn.commit()
                                 st.success(f"{action}: {qty} × {row['item']}")
                                 st.rerun()
                             except Exception as e:
                                 st.error("Transaction failed")
-                                st.code(e)
+                                st.code(str(e))
 
 # ————————————————————————
 # TAB 2: TRANSACTIONS
@@ -181,10 +201,7 @@ with tab_inv:
 with tab_tx:
     st.subheader("Recent Transactions")
     try:
-        df_tx = pd.read_sql(
-            "SELECT * FROM transactions ORDER BY timestamp DESC LIMIT 100", 
-            conn
-        )
+        df_tx = pd.read_sql("SELECT * FROM transactions ORDER BY timestamp DESC LIMIT 100", conn)
         if not df_tx.empty:
             df_display = df_tx[['timestamp', 'action', 'qty', 'item', 'user']].copy()
             df_display['timestamp'] = pd.to_datetime(df_display['timestamp']).dt.strftime('%Y-%m-%d %H:%M')
@@ -192,8 +209,8 @@ with tab_tx:
         else:
             st.info("No transactions yet.")
     except Exception as e:
-        st.error("Failed to load transactions")
-        st.code(e)
+        st.error("Load failed")
+        st.code(str(e))
 
 # ————————————————————————
 # TAB 3: REPORTS
@@ -203,14 +220,13 @@ with tab_rep:
     try:
         df_report = pd.read_sql("SELECT * FROM inventory ORDER BY location", conn)
         st.dataframe(df_report, use_container_width=True)
-        
         csv = df_report.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download CSV Report",
             data=csv,
-            file_name=f"tool_crib_inventory_{datetime.now().strftime('%Y%m%d')}.csv",
+            file_name=f"tool_crib_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
     except Exception as e:
-        st.error("Failed to generate report")
-        st.code(e)
+        st.error("Report failed")
+        st.code(str(e))
