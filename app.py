@@ -23,7 +23,7 @@ def download_db_from_drive():
         try:
             import gdown
             with st.spinner("Downloading database from Google Drive..."):
-                url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+                url = f"https://drive.google.com/uc?id=1LK4IygkqQCHGC02W8KufRIixIqNpHux6/view?usp=sharing"
                 gdown.download(url, DB_PATH, quiet=False)
             st.success("Database restored from Google Drive")
             return True
@@ -35,7 +35,7 @@ def download_db_from_drive():
 def upload_db_to_drive():
     try:
         import gdown
-        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+        url = f"https://drive.google.com/uc?id=1LK4IygkqQCHGC02W8KufRIixIqNpHux6/view?usp=sharing"
         gdown.upload(DB_PATH, url, resume=True)
         st.sidebar.success(f"DB auto-saved to Drive @ {datetime.now():%H:%M}")
     except Exception as e:
